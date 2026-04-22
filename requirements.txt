@@ -1,0 +1,18 @@
+# Core web framework
+Flask>=2.3.0
+
+# AI API client
+anthropic>=0.25.0
+
+# PDF processing
+PyMuPDF>=1.23.0
+
+# Excel file processing
+openpyxl>=3.1.0
+
+# HTTP requests for Feishu API
+requests>=2.31.0
+
+# Development dependencies
+pytest>=7.4.0
+pytest-cov>=4.1.0

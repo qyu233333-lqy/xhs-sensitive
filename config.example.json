@@ -1,0 +1,21 @@
+{
+  "api_key": "sk-your-anthropic-api-key-here",
+  "base_url": "https://ai-api.kkidc.com",
+  "model": "claude-opus-4-6",
+  "feishu_app_id": "cli_your-feishu-app-id-here",
+  "feishu_app_secret": "your-feishu-app-secret-here",
+
+  "project_config_path": "ref.csv",
+  "enable_project_audit": true,
+  "audit_modes": {
+    "hashtag_strict": true,
+    "benefit_fuzzy": false,
+    "slogan_exact": true
+  },
+  "project_audit_settings": {
+    "auto_match_projects": true,
+    "fallback_to_general_audit": true,
+    "max_project_details": 5,
+    "include_project_info_in_notes": true
+  }
+}
