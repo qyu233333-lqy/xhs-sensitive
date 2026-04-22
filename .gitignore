@@ -64,4 +64,4 @@ venv.bak/
 # Application specific
 uploads/
 results/
-*.log
+*.log.venv_paddleocr/
