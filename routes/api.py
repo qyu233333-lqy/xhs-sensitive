@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 from flask import Blueprint, request, jsonify, Response
 
-from core.config import load_config, save_config
+from core.config import get_key_profiles_metadata, load_config, resolve_ai_profile, save_config
 from core.project import clear_project_configs_cache, load_project_configs, save_project_config
 from core.feishu import (
     download_feishu_doc_snapshot,
@@ -52,10 +52,17 @@ def handle_config():
     try:
         if request.method == "GET":
             config = load_config()
+            profiles = config.get("key_profiles") or {}
+            has_any_profile_key = any(
+                isinstance(profile, dict) and profile.get("api_key")
+                for profile in profiles.values()
+            )
             # 隐藏敏感信息
             safe_config = {k: v for k, v in config.items() if k not in ["api_key", "feishu_app_secret"]}
-            safe_config["has_api_key"] = bool(config.get("api_key"))
+            safe_config["has_api_key"] = bool(config.get("api_key")) or has_any_profile_key
             safe_config["has_feishu_secret"] = bool(config.get("feishu_app_secret"))
+            safe_config["key_profiles"] = get_key_profiles_metadata(config)
+            safe_config["default_profile_id"] = config.get("default_profile_id", "ops1")
             return safe_json_response(safe_config)
 
         elif request.method == "POST":
@@ -105,6 +112,7 @@ def parse_url():
             return safe_json_response({"error": "缺少URL参数"}, 400)
 
         url = data["url"].strip()
+        profile_id = (data.get("profile_id") or "").strip() or None
         if not url:
             return safe_json_response({"error": "URL不能为空"}, 400)
 
@@ -129,6 +137,7 @@ def parse_url():
             "task_id": task_id,
             "type": "feishu_url",
             "url": url,
+            "profile_id": profile_id or config.get("default_profile_id") or "ops1",
             "data": sheet_data,
             "status": "ready",
             "created_at": datetime.now().isoformat()
@@ -193,6 +202,7 @@ def upload_file():
         task_data = {
             "task_id": task_id,
             "type": "excel_upload",
+            "profile_id": request.form.get("profile_id") or load_config().get("default_profile_id") or "ops1",
             "file_path": file_path,
             "original_filename": original_filename,
             "data": excel_data,
@@ -439,3 +449,17 @@ def get_task_status(task_id):
     except Exception as e:
         logger.error(f"Failed to get task status for {task_id}: {e}")
         return safe_json_response({"error": f"获取任务状态失败: {str(e)}"}, 500)
+
+
+@api_bp.route("/key-profiles", methods=["GET"])
+def get_key_profiles():
+    """获取可供前端选择的部门配置，不返回真实密钥。"""
+    try:
+        config = load_config()
+        return safe_json_response({
+            "default_profile_id": config.get("default_profile_id", "ops1"),
+            "profiles": get_key_profiles_metadata(config),
+        })
+    except Exception as e:
+        logger.error(f"Failed to get key profiles: {e}")
+        return safe_json_response({"error": f"获取部门配置失败: {str(e)}"}, 500)

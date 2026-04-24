@@ -16,7 +16,11 @@ def index():
     try:
         config = load_config()
         # 检查基本配置
-        has_config = bool(config.get("api_key"))
+        profiles = config.get("key_profiles") or {}
+        has_config = bool(config.get("api_key")) or any(
+            isinstance(profile, dict) and profile.get("api_key")
+            for profile in profiles.values()
+        )
         has_feishu = bool(config.get("feishu_app_id") and config.get("feishu_app_secret"))
 
         return render_template("index.html",

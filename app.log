@@ -24638,3 +24638,33 @@ image.png
 2026-04-21 15:29:20,305 - core.file_utils - INFO - Successfully saved 8 rows to Excel: /Users/qingyu/work/content_review_web/results/d6e0d6cb_feishu_results_20260421_152920.xlsx
 2026-04-21 15:29:21,515 - core.feishu - INFO - Successfully wrote 2 updates to Feishu bitable
 2026-04-21 15:29:21,517 - core.review_engine - INFO - Successfully wrote back 2 updates to Feishu bitable
+2026-04-22 14:19:25,779 - werkzeug - INFO - 127.0.0.1 - - [22/Apr/2026 14:19:25] "GET / HTTP/1.1" 200 -
+2026-04-22 14:19:25,790 - werkzeug - INFO - 127.0.0.1 - - [22/Apr/2026 14:19:25] "GET /api/config HTTP/1.1" 200 -
+2026-04-22 14:19:25,832 - werkzeug - INFO - 127.0.0.1 - - [22/Apr/2026 14:19:25] "GET /api/project-configs HTTP/1.1" 200 -
+2026-04-22 14:19:25,833 - werkzeug - INFO - 127.0.0.1 - - [22/Apr/2026 14:19:25] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+2026-04-23 10:25:07,942 - werkzeug - INFO - 127.0.0.1 - - [23/Apr/2026 10:25:07] "GET / HTTP/1.1" 200 -
+2026-04-23 10:25:07,950 - werkzeug - INFO - 127.0.0.1 - - [23/Apr/2026 10:25:07] "GET /api/config HTTP/1.1" 200 -
+2026-04-23 10:25:07,994 - werkzeug - INFO - 127.0.0.1 - - [23/Apr/2026 10:25:07] "GET /api/project-configs HTTP/1.1" 200 -
+2026-04-23 10:57:00,786 - __main__ - INFO - Starting Content Review Web Application
+2026-04-23 10:57:00,799 - werkzeug - INFO - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:8000
+ * Running on http://172.19.0.0:8000
+2026-04-23 10:57:00,799 - werkzeug - INFO - [33mPress CTRL+C to quit[0m
+2026-04-23 11:11:17,965 - __main__ - INFO - Starting Content Review Web Application
+2026-04-23 11:11:17,972 - werkzeug - INFO - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:8000
+ * Running on http://172.19.0.0:8000
+2026-04-23 11:11:17,972 - werkzeug - INFO - [33mPress CTRL+C to quit[0m
+2026-04-23 18:00:29,304 - werkzeug - INFO - 127.0.0.1 - - [23/Apr/2026 18:00:29] "GET / HTTP/1.1" 200 -
+2026-04-23 18:00:29,312 - werkzeug - INFO - 127.0.0.1 - - [23/Apr/2026 18:00:29] "GET /api/config HTTP/1.1" 200 -
+2026-04-23 18:00:30,570 - core.feishu - INFO - Detected embedded Bitable block in spreadsheet AtX3sh4hphis1xtg1yzczpVbngf: app_token=CV5Ib9jICaY1i6sw3a3cFu8inEb, table_id=tblMEdOyJfVpUEki
+2026-04-23 18:00:33,372 - core.feishu - INFO - Successfully fetched Bitable data: 9 rows, 4 columns
+2026-04-23 18:00:33,379 - core.project - WARNING - 飞书标准表第9行配置验证失败: 利益点标准不能为空
+2026-04-23 18:00:33,379 - core.project - WARNING - 飞书标准表第10行配置验证失败: 利益点标准不能为空
+2026-04-23 18:00:33,379 - core.project - INFO - Loaded 7 project configurations from Feishu: https://my.feishu.cn/sheets/AtX3sh4hphis1xtg1yzczpVbngf?table=tblMEdOyJfVpUEki&view=vewxFMx5ld&sheet=qtjREA
+2026-04-23 18:00:33,380 - werkzeug - INFO - 127.0.0.1 - - [23/Apr/2026 18:00:33] "GET /api/project-configs HTTP/1.1" 200 -
+2026-04-23 18:01:10,117 - werkzeug - INFO - 127.0.0.1 - - [23/Apr/2026 18:01:10] "GET / HTTP/1.1" 200 -
+2026-04-23 18:01:10,160 - werkzeug - INFO - 127.0.0.1 - - [23/Apr/2026 18:01:10] "GET /api/config HTTP/1.1" 200 -
+2026-04-23 18:01:10,195 - werkzeug - INFO - 127.0.0.1 - - [23/Apr/2026 18:01:10] "GET /api/project-configs HTTP/1.1" 200 -

@@ -207,6 +207,10 @@ body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
   <!-- 飞书链接输入 -->
   <div class="card" id="inputCard">
     <h2><span class="icon">&#128196;</span> 飞书表格</h2>
+    <div class="setting-row" style="margin-bottom:16px;">
+      <label>使用部门</label>
+      <select id="profileSelect"></select>
+    </div>
     <div class="url-input-group">
       <input type="text" id="feishuUrl" placeholder="粘贴飞书表格链接，如 https://xxx.feishu.cn/sheets/xxx">
       <div class="url-actions">
@@ -283,9 +287,6 @@ async function loadConfig() {
   try {
     const r = await fetch('/api/config');
     const cfg = await r.json();
-    if (cfg.api_key_display) {
-      document.getElementById('apiKey').placeholder = '已保存: ' + cfg.api_key_display;
-    }
     if (cfg.base_url) document.getElementById('baseUrl').value = cfg.base_url;
     if (cfg.model) document.getElementById('model').value = cfg.model;
     if (cfg.feishu_app_id) document.getElementById('feishuAppId').value = cfg.feishu_app_id;
@@ -293,9 +294,20 @@ async function loadConfig() {
     if (cfg.feishu_secret_display) {
       document.getElementById('feishuAppSecret').placeholder = '已保存: ' + cfg.feishu_secret_display;
     }
-    updateConfigStatus(!!cfg.api_key_display);
+    renderProfiles(cfg.key_profiles || [], cfg.default_profile_id || 'ops1');
+    updateConfigStatus(!!cfg.has_api_key);
   } catch(e) {}
   loadKnowledgeBase();
+}
+
+function renderProfiles(profiles, defaultProfileId) {
+  const select = document.getElementById('profileSelect');
+  if (!select) return;
+  const options = (profiles && profiles.length ? profiles : [{id: 'ops1', label: '运营一部'}])
+    .map(profile => `<option value="${esc(profile.id)}">${esc(profile.label)}</option>`)
+    .join('');
+  select.innerHTML = options;
+  select.value = defaultProfileId || (profiles[0] && profiles[0].id) || 'ops1';
 }
 
 async function saveConfig() {
@@ -409,7 +421,7 @@ async function parseUrl() {
     const r = await fetch('/api/parse-url', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ url }),
+      body: JSON.stringify({ url, profile_id: document.getElementById('profileSelect').value }),
     });
     const data = await r.json();
 
@@ -448,7 +460,7 @@ async function quickFillApprovedContent() {
     const parseResp = await fetch('/api/parse-url', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ url }),
+      body: JSON.stringify({ url, profile_id: document.getElementById('profileSelect').value }),
     });
     const parseData = await parseResp.json();
     if (parseData.error) {

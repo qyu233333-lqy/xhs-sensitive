@@ -9,7 +9,7 @@ from typing import Dict, List, Any, Generator
 
 import anthropic
 
-from .config import load_config
+from .config import load_config, resolve_ai_profile
 from .project import get_project_config_exact_for_review
 from .feishu import (
     add_feishu_comment,
@@ -60,16 +60,17 @@ def process_review_task(task_data: Dict[str, Any]) -> Generator[Dict[str, Any], 
     try:
         # 加载配置
         config = load_config()
-        if not config.get("api_key"):
+        ai_profile = resolve_ai_profile(config, task_data.get("profile_id"))
+        if not ai_profile.get("api_key"):
             raise ValueError("缺少API密钥配置")
 
         # 初始化Anthropic客户端
-        client_kwargs = {"api_key": config["api_key"]}
-        if config.get("base_url"):
-            client_kwargs["base_url"] = config["base_url"]
+        client_kwargs = {"api_key": ai_profile["api_key"]}
+        if ai_profile.get("base_url"):
+            client_kwargs["base_url"] = ai_profile["base_url"]
 
         client = anthropic.Anthropic(**client_kwargs)
-        model = config.get("model", "claude-sonnet-4-20250514")
+        model = ai_profile.get("model", "claude-sonnet-4-20250514")
 
         # 获取数据
         data_rows = task_data["data"]["data"]
