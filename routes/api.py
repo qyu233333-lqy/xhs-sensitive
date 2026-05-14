@@ -258,7 +258,11 @@ def handle_config():
             save_config(config)
 
             # 清除项目配置缓存（如果项目配置路径发生变化）
-            if "project_config_path" in data or "enable_project_audit" in data:
+            if (
+                "project_config_path" in data
+                or "project_config_feishu_url" in data
+                or "enable_project_audit" in data
+            ):
                 clear_project_configs_cache()
 
             return safe_json_response({"success": True, "message": "配置已保存"})

@@ -469,6 +469,7 @@ async function saveConfig() {
     document.getElementById('dingtalkAppSecret').value = '';
     toggleSettings();
     await loadAuthState();
+    await loadKnowledgeBase();
   }
 }
 
