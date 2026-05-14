@@ -1,9 +1,39 @@
 {
-  "api_key": "sk-your-anthropic-api-key-here",
-  "base_url": "https://ai-api.kkidc.com",
+  "session_secret": "change-this-session-secret",
+  "api_key": "",
+  "base_url": "",
   "model": "claude-opus-4-6",
   "feishu_app_id": "cli_your-feishu-app-id-here",
   "feishu_app_secret": "your-feishu-app-secret-here",
+  "default_profile_id": "ops1",
+  "key_profiles": {
+    "ops1": {
+      "label": "运营一部",
+      "api_key": "",
+      "base_url": "",
+      "model": "claude-opus-4-6",
+      "enabled": true
+    },
+    "ops3": {
+      "label": "运营三部",
+      "api_key": "",
+      "base_url": "",
+      "model": "claude-opus-4-6",
+      "enabled": true
+    }
+  },
+  "auth": {
+    "enabled": true,
+    "provider": "dingtalk",
+    "dingtalk_app_key": "dingxxxx",
+    "dingtalk_app_secret": "your-dingtalk-app-secret",
+    "dingtalk_redirect_uri": "http://your-host/api/auth/dingtalk/callback",
+    "dingtalk_scope": "openid",
+    "authorize_url": "https://login.dingtalk.com/oauth2/auth",
+    "user_access_token_url": "https://api.dingtalk.com/v1.0/oauth2/userAccessToken",
+    "user_info_url": "https://api.dingtalk.com/v1.0/contact/users/me",
+    "user_mapping_path": "user_groups.json"
+  },
 
   "project_config_path": "ref.csv",
   "enable_project_audit": true,

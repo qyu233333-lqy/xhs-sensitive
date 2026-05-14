@@ -114,6 +114,13 @@ body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
 .knowledge-item:last-child { border-bottom: none; }
 .knowledge-item .name { font-weight: 600; margin-bottom: 6px; }
 .knowledge-item .meta { color: #666; font-size: 13px; line-height: 1.6; white-space: pre-wrap; }
+.auth-card { display:flex; justify-content:space-between; gap:16px; align-items:center; flex-wrap:wrap; }
+.auth-meta { color:#666; font-size:14px; line-height:1.7; }
+.auth-meta strong { color:#333; }
+.auth-actions { display:flex; gap:12px; align-items:center; }
+.auth-tip { margin-top:12px; padding:10px 14px; border-radius:8px; font-size:13px; }
+.auth-tip.warn { background:#fff7e6; color:#ad6800; }
+.auth-tip.err { background:#fff2f0; color:#cf1322; }
 </style>
 </head>
 <body>
@@ -124,6 +131,18 @@ body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
 </div>
 
 <div class="container">
+
+  <div class="card" id="authCard">
+    <h2><span class="icon">&#128274;</span> 登录状态</h2>
+    <div class="auth-card">
+      <div class="auth-meta" id="authSummary">检测中...</div>
+      <div class="auth-actions">
+        <button class="btn btn-outline hidden" id="loginBtn" onclick="startLogin()">钉钉登录</button>
+        <button class="btn btn-outline hidden" id="logoutBtn" onclick="logout()">退出登录</button>
+      </div>
+    </div>
+    <div class="auth-tip hidden" id="authTip"></div>
+  </div>
 
   <!-- 设置 -->
   <div class="card" id="settingsCard">
@@ -157,6 +176,29 @@ body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
       <div class="setting-row">
         <label>飞书 Secret</label>
         <input type="password" id="feishuAppSecret" placeholder="飞书应用密钥">
+      </div>
+      <div class="setting-row">
+        <label>启用钉钉登录</label>
+        <select id="authEnabled">
+          <option value="false">否</option>
+          <option value="true">是</option>
+        </select>
+      </div>
+      <div class="setting-row">
+        <label>钉钉 App Key</label>
+        <input type="text" id="dingtalkAppKey" placeholder="appKey">
+      </div>
+      <div class="setting-row">
+        <label>钉钉 App Secret</label>
+        <input type="password" id="dingtalkAppSecret" placeholder="appSecret">
+      </div>
+      <div class="setting-row">
+        <label>回调地址</label>
+        <input type="text" id="dingtalkRedirectUri" placeholder="例如 http://你的域名/api/auth/dingtalk/callback">
+      </div>
+      <div class="setting-row">
+        <label>用户映射文件</label>
+        <input type="text" id="userMappingPath" placeholder="默认 user_groups.json">
       </div>
       <div class="setting-row">
         <label>标准飞书链接</label>
@@ -207,10 +249,7 @@ body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
   <!-- 飞书链接输入 -->
   <div class="card" id="inputCard">
     <h2><span class="icon">&#128196;</span> 飞书表格</h2>
-    <div class="setting-row" style="margin-bottom:16px;">
-      <label>使用部门</label>
-      <select id="profileSelect"></select>
-    </div>
+    <div style="margin-bottom:16px; color:#666; font-size:14px;" id="profileHint">将根据当前登录账号自动选择对应部门配置。</div>
     <div class="url-input-group">
       <input type="text" id="feishuUrl" placeholder="粘贴飞书表格链接，如 https://xxx.feishu.cn/sheets/xxx">
       <div class="url-actions">
@@ -268,6 +307,7 @@ body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
 
 <script>
 let currentTaskId = null;
+let authState = null;
 
 function esc(s) {
   const el = document.createElement('span');
@@ -294,20 +334,100 @@ async function loadConfig() {
     if (cfg.feishu_secret_display) {
       document.getElementById('feishuAppSecret').placeholder = '已保存: ' + cfg.feishu_secret_display;
     }
-    renderProfiles(cfg.key_profiles || [], cfg.default_profile_id || 'ops1');
+    if (cfg.auth) {
+      document.getElementById('authEnabled').value = String(!!cfg.auth.enabled);
+      if (cfg.auth.app_key) document.getElementById('dingtalkAppKey').value = cfg.auth.app_key;
+      if (cfg.auth.redirect_uri) document.getElementById('dingtalkRedirectUri').value = cfg.auth.redirect_uri;
+      if (cfg.auth.user_mapping_path) document.getElementById('userMappingPath').value = cfg.auth.user_mapping_path;
+      if (cfg.auth.has_app_secret) document.getElementById('dingtalkAppSecret').placeholder = '已保存: app secret';
+    }
     updateConfigStatus(!!cfg.has_api_key);
   } catch(e) {}
+  await loadAuthState();
   loadKnowledgeBase();
 }
 
-function renderProfiles(profiles, defaultProfileId) {
-  const select = document.getElementById('profileSelect');
-  if (!select) return;
-  const options = (profiles && profiles.length ? profiles : [{id: 'ops1', label: '运营一部'}])
-    .map(profile => `<option value="${esc(profile.id)}">${esc(profile.label)}</option>`)
-    .join('');
-  select.innerHTML = options;
-  select.value = defaultProfileId || (profiles[0] && profiles[0].id) || 'ops1';
+async function loadAuthState() {
+  try {
+    const r = await fetch('/api/auth/me');
+    authState = await r.json();
+  } catch (e) {
+    authState = {
+      enabled: false,
+      ready: false,
+      authenticated: false,
+      error: e.message,
+    };
+  }
+  renderAuthState();
+}
+
+function renderAuthState() {
+  const summary = document.getElementById('authSummary');
+  const tip = document.getElementById('authTip');
+  const loginBtn = document.getElementById('loginBtn');
+  const logoutBtn = document.getElementById('logoutBtn');
+  const settingsCard = document.getElementById('settingsCard');
+  const profileHint = document.getElementById('profileHint');
+  const parseBtn = document.getElementById('parseBtn');
+  const quickFillBtn = document.getElementById('quickFillBtn');
+
+  tip.classList.add('hidden');
+  tip.textContent = '';
+  tip.className = 'auth-tip hidden';
+  loginBtn.classList.add('hidden');
+  logoutBtn.classList.add('hidden');
+
+  if (!authState || !authState.enabled) {
+    summary.innerHTML = '<strong>登录模式：</strong>未启用钉钉登录，当前为本地管理模式。';
+    settingsCard.classList.remove('hidden');
+    profileHint.textContent = '当前未启用登录鉴权，默认使用本地配置的部门 profile。';
+    parseBtn.disabled = false;
+    quickFillBtn.disabled = false;
+    return;
+  }
+
+  const user = authState.user || {};
+  if (authState.authenticated) {
+    summary.innerHTML = `<strong>当前用户：</strong>${esc(user.display_name || '')}　<strong>部门配置：</strong>${esc(user.profile_label || user.profile_id || '')}${user.is_admin ? '　<strong>角色：</strong>管理员' : ''}`;
+    logoutBtn.classList.remove('hidden');
+    settingsCard.classList.toggle('hidden', !user.is_admin);
+    profileHint.textContent = `当前登录账号将自动使用「${user.profile_label || user.profile_id || ''}」对应的服务端 LLM 配置。`;
+    parseBtn.disabled = false;
+    quickFillBtn.disabled = false;
+    return;
+  }
+
+  summary.innerHTML = '<strong>登录模式：</strong>已启用钉钉登录，但当前未登录。';
+  loginBtn.classList.remove('hidden');
+  settingsCard.classList.toggle('hidden', !!authState.ready);
+  profileHint.textContent = '请先使用钉钉登录，系统会自动判断你所属的部门配置。';
+  parseBtn.disabled = true;
+  quickFillBtn.disabled = true;
+
+  if (!authState.ready) {
+    tip.textContent = '钉钉登录已启用，但 App Key / App Secret / 回调地址 还未配置完整。';
+    tip.className = 'auth-tip warn';
+    tip.classList.remove('hidden');
+  }
+
+  const params = new URLSearchParams(window.location.search);
+  const authError = params.get('auth_error');
+  if (authError) {
+    tip.textContent = `登录失败：${authError}`;
+    tip.className = 'auth-tip err';
+    tip.classList.remove('hidden');
+  }
+}
+
+function startLogin() {
+  if (!authState || !authState.login_url) return;
+  window.location.href = authState.login_url;
+}
+
+async function logout() {
+  await fetch('/api/auth/logout', {method: 'POST'});
+  window.location.href = '/';
 }
 
 async function saveConfig() {
@@ -317,6 +437,13 @@ async function saveConfig() {
     model: document.getElementById('model').value,
     feishu_app_id: document.getElementById('feishuAppId').value.trim(),
     project_config_feishu_url: document.getElementById('projectConfigFeishuUrl').value.trim(),
+    auth: {
+      enabled: document.getElementById('authEnabled').value === 'true',
+      dingtalk_app_key: document.getElementById('dingtalkAppKey').value.trim(),
+      dingtalk_app_secret: document.getElementById('dingtalkAppSecret').value.trim(),
+      dingtalk_redirect_uri: document.getElementById('dingtalkRedirectUri').value.trim(),
+      user_mapping_path: document.getElementById('userMappingPath').value.trim(),
+    }
   };
   if (key) data.api_key = key;
   const feishuSecret = document.getElementById('feishuAppSecret').value.trim();
@@ -335,7 +462,9 @@ async function saveConfig() {
       document.getElementById('feishuAppSecret').value = '';
       document.getElementById('feishuAppSecret').placeholder = '已保存: ' + feishuSecret.slice(0,4) + '***' + feishuSecret.slice(-4);
     }
+    document.getElementById('dingtalkAppSecret').value = '';
     toggleSettings();
+    await loadAuthState();
   }
 }
 
@@ -421,7 +550,7 @@ async function parseUrl() {
     const r = await fetch('/api/parse-url', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ url, profile_id: document.getElementById('profileSelect').value }),
+      body: JSON.stringify({ url }),
     });
     const data = await r.json();
 
@@ -460,7 +589,7 @@ async function quickFillApprovedContent() {
     const parseResp = await fetch('/api/parse-url', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ url, profile_id: document.getElementById('profileSelect').value }),
+      body: JSON.stringify({ url }),
     });
     const parseData = await parseResp.json();
     if (parseData.error) {
@@ -476,17 +605,7 @@ async function quickFillApprovedContent() {
     document.getElementById('sheetMeta').textContent = `共 ${parseData.total} 条稿件，${parseData.new_count} 条待审核${skipInfo}`;
     document.getElementById('parseInfo').classList.remove('hidden');
 
-    const fillResp = await fetch(`/api/fill-approved-content/${currentTaskId}`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'}
-    });
-    const fillData = await fillResp.json();
-    if (fillData.error) {
-      alert(fillData.error);
-      return;
-    }
-
-    alert(fillData.message + `（更新 ${fillData.updated} 条，跳过 ${fillData.skipped} 条）`);
+    await startFillApprovedContentJob(currentTaskId, btn, parseBtn);
   } catch(e) {
     document.getElementById('parseError').textContent = '回填失败: ' + e.message;
     document.getElementById('parseError').className = 'parse-error';
@@ -506,22 +625,52 @@ async function fillApprovedContent() {
   btn.textContent = '回填中...';
 
   try {
-    const r = await fetch(`/api/fill-approved-content/${currentTaskId}`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'}
-    });
-    const data = await r.json();
-    if (data.error) {
-      alert(data.error);
-      return;
-    }
-    alert(data.message + `（更新 ${data.updated} 条，跳过 ${data.skipped} 条）`);
+    await startFillApprovedContentJob(currentTaskId, btn);
   } catch (e) {
     alert('回填失败: ' + e.message);
   } finally {
     btn.disabled = false;
     btn.textContent = '回填通过稿件';
   }
+}
+
+async function parseJsonSafely(resp) {
+  const text = await resp.text();
+  try {
+    return text ? JSON.parse(text) : {error: `空响应（HTTP ${resp.status})`};
+  } catch (e) {
+    return {error: text || `服务器返回了非 JSON 响应（HTTP ${resp.status})`};
+  }
+}
+
+async function pollFillApprovedContentStatus(taskId, btn, extraBtn) {
+  while (true) {
+    await new Promise(resolve => setTimeout(resolve, 1200));
+    const resp = await fetch(`/api/fill-approved-content/${taskId}/status`);
+    const data = await parseJsonSafely(resp);
+    if (data.error) throw new Error(data.error);
+
+    const processed = data.processed_rows || 0;
+    const total = data.total || 0;
+    const label = total ? `回填中 ${processed}/${total}` : '回填中...';
+    if (btn) btn.textContent = label;
+    if (extraBtn) extraBtn.textContent = label;
+
+    if (data.status === 'completed') return data;
+    if (data.status === 'failed') throw new Error(data.error || data.message || '回填失败');
+  }
+}
+
+async function startFillApprovedContentJob(taskId, btn, extraBtn) {
+  const resp = await fetch(`/api/fill-approved-content/${taskId}`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'}
+  });
+  const data = await parseJsonSafely(resp);
+  if (data.error) throw new Error(data.error);
+
+  const result = await pollFillApprovedContentStatus(taskId, btn, extraBtn);
+  alert(result.message + `（更新 ${result.updated} 条，跳过 ${result.skipped} 条）`);
 }
 
 // ─── Review ───
@@ -540,11 +689,17 @@ function startReview() {
   es.onmessage = (e) => {
     const d = JSON.parse(e.data);
 
+    if (d.type === 'status' && d.message) {
+      document.getElementById('progressText').textContent = d.message;
+    }
+
     if (d.type === 'progress') {
       const pct = Math.round(d.current / d.total * 100);
       document.getElementById('progressBar').style.width = pct + '%';
-      document.getElementById('progressText').textContent =
-        `正在审核 ${d.current}/${d.total}：${d.account}`;
+      const detail = d.message || d.account || '';
+      document.getElementById('progressText').textContent = detail && !detail.startsWith('处理第')
+        ? `正在审核 ${d.current}/${d.total}：${detail}`
+        : `正在审核 ${d.current}/${d.total}`;
     }
 
     if (d.type === 'item_done') {

@@ -6,6 +6,7 @@ import os
 import re
 import time
 import logging
+import mimetypes
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Any, Optional, Tuple
 from urllib.parse import urlparse, parse_qs
@@ -150,7 +151,7 @@ def extract_review_doc_sections(content: str) -> Dict[str, str]:
         return bool(re.match(r"^(?:[一二三四五六七八九十1234567890ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+[、.．\- ]*)?标题\s*[：:]?$", line))
 
     def _is_body_header(line: str) -> bool:
-        return bool(re.match(r"^(?:[一二三四五六七八九十1234567890ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+[、.．\- ]*)?(?:发布文案|文案)\s*[：:]?$", line))
+        return bool(re.match(r"^(?:[一二三四五六七八九十1234567890ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+[、.．\- ]*)?(?:发布文案|文案|正文|内容)\s*[：:]?$", line))
 
     def _is_comment_header(line: str) -> bool:
         return bool(re.match(r"^(?:评论区置顶|置顶评论|评论区文案)\s*[：:]?", line))
@@ -244,6 +245,53 @@ def fetch_feishu_sheet(url: str, app_id: str, app_secret: str, auditable_only: b
         dict: 包含表格数据和元信息的字典
     """
     try:
+        # wiki 链接需要先解析出其挂载的真实对象，再决定走 sheets 还是 bitable
+        if "/wiki/" in url:
+            token = get_feishu_token(app_id, app_secret)
+            if not token:
+                raise ValueError("无法获取飞书访问令牌")
+
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            }
+            node_info = _resolve_wiki_node_info(url, headers)
+            obj_type = node_info.get("obj_type", "")
+            obj_token = node_info.get("obj_token", "")
+            wiki_title = node_info.get("title", "")
+            if not obj_token:
+                raise ValueError("无法从Wiki节点中解析对象ID")
+
+            parsed = urlparse(url)
+            query = parsed.query
+
+            if obj_type in {"sheet", "spreadsheet"}:
+                synthetic_url = f"https://my.feishu.cn/sheets/{obj_token}"
+                if query:
+                    synthetic_url = f"{synthetic_url}?{query}"
+                logger.info(
+                    "Resolved wiki sheet node: wiki_token=%s obj_token=%s title=%s",
+                    parsed.path.rstrip("/").split("/")[-1],
+                    obj_token,
+                    wiki_title,
+                )
+                return _fetch_sheets_data(synthetic_url, app_id, app_secret, auditable_only=auditable_only)
+
+            if obj_type in {"bitable", "base", "table"}:
+                table_id = parse_qs(parsed.query).get("table", [None])[0]
+                if not table_id:
+                    raise ValueError("Wiki链接缺少table参数，无法解析多维表格")
+                logger.info(
+                    "Resolved wiki bitable node: wiki_token=%s app_token=%s table_id=%s title=%s",
+                    parsed.path.rstrip("/").split("/")[-1],
+                    obj_token,
+                    table_id,
+                    wiki_title,
+                )
+                return _fetch_bitable_with_token(obj_token, table_id, app_id, app_secret, url, auditable_only=auditable_only)
+
+            raise ValueError(f"Wiki链接指向的对象类型不支持表格解析: {obj_type or 'unknown'}")
+
         # 检查是否是Bitable（多维表格）
         if _is_bitable_url(url):
             return _fetch_bitable_data(url, app_id, app_secret, auditable_only=auditable_only)
@@ -258,20 +306,57 @@ def fetch_feishu_sheet(url: str, app_id: str, app_secret: str, auditable_only: b
 def _is_bitable_url(url: str) -> bool:
     """判断 URL 是否应按 Bitable（多维表格）处理。
 
-    飞书存在 `/sheets/...?...table=...` 这种链接形式，其中 `table` 只是视图参数，
-    但路径本身仍是普通 Sheets 分享链接，不能直接拿路径 token 调 Bitable App API。
+    只把真正的 Bitable / Base 分享链接当成 Bitable。
+    `sheets/...?...table=...` 这类链接仍应走普通 Sheets 解析。
     """
     parsed = urlparse(url)
     path = parsed.path.lower()
 
     if "/base/" in path or "/bitable/" in path:
         return True
+    return False
 
-    if "/sheets/" in path:
-        return False
 
-    query_params = parse_qs(parsed.query)
-    return "table" in query_params
+def _resolve_wiki_node_info(url: str, headers: Dict[str, str]) -> Dict[str, str]:
+    """解析 wiki 链接对应的节点信息。"""
+    if '/wiki/' not in url:
+        return {"obj_type": "", "obj_token": "", "title": ""}
+
+    wiki_token = url.split('/wiki/')[1].split('?')[0].split('#')[0]
+    node_api_url = f"https://open.feishu.cn/open-apis/wiki/v2/nodes/{wiki_token}"
+    node_response = http_requests.get(node_api_url, headers=headers, timeout=15)
+
+    node_result = None
+    if node_response.status_code == 200:
+        candidate = node_response.json()
+        if candidate.get("code") == 0:
+            node_result = candidate
+    else:
+        logger.warning("Wiki node API returned HTTP %s for %s, falling back to spaces/get_node", node_response.status_code, wiki_token)
+
+    if node_result is None:
+        fallback_api_url = "https://open.feishu.cn/open-apis/wiki/v2/spaces/get_node"
+        fallback_response = http_requests.get(
+            fallback_api_url,
+            headers=headers,
+            params={"token": wiki_token},
+            timeout=15,
+        )
+        if fallback_response.status_code != 200:
+            logger.error("Wiki fallback API error: HTTP %s", fallback_response.status_code)
+            return {"obj_type": "", "obj_token": "", "title": ""}
+        candidate = fallback_response.json()
+        if candidate.get("code") != 0:
+            logger.error("Wiki fallback API error: %s", candidate.get("msg", "Unknown error"))
+            return {"obj_type": "", "obj_token": "", "title": ""}
+        node_result = candidate
+
+    node_data = node_result.get("data", {}).get("node", {})
+    return {
+        "obj_type": str(node_data.get("obj_type") or "").strip().lower(),
+        "obj_token": str(node_data.get("obj_token") or "").strip(),
+        "title": str(node_data.get("title") or "").strip(),
+    }
 
 
 def _extract_sheet_meta_id(sheet_meta: Dict[str, Any]) -> Optional[str]:
@@ -281,6 +366,35 @@ def _extract_sheet_meta_id(sheet_meta: Dict[str, Any]) -> Optional[str]:
         if value:
             return str(value)
     return None
+
+
+def _first_query_value(query_params: Dict[str, Any], key: str) -> Optional[str]:
+    """从 parse_qs 的返回值中提取第一个标量值。"""
+    value = query_params.get(key)
+    if value is None:
+        return None
+    if isinstance(value, list):
+        if not value:
+            return None
+        value = value[0]
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return None
+        value = value[0]
+    value = str(value).strip()
+    return value or None
+
+
+def _cell_text(value: Any) -> str:
+    """把飞书单元格值统一压成可做字典 key 的文本。"""
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        return str(value.get("text") or value.get("link") or value.get("url") or "").strip()
+    if isinstance(value, list):
+        parts = [_cell_text(item) for item in value]
+        return "; ".join([part for part in parts if part]).strip()
+    return str(value).strip()
 
 
 def _extract_sheet_meta_title(sheet_meta: Dict[str, Any]) -> Optional[str]:
@@ -389,8 +503,10 @@ def _fetch_bitable_with_token(app_token: str, table_id: str, app_id: str, app_se
         field_map = {}
         headers_row = []
         for field in fields_data["data"]["items"]:
-            field_id = field["field_id"]
-            field_name = field["field_name"]
+            field_id = str(field.get("field_id") or "").strip()
+            field_name = str(field.get("field_name") or "").strip()
+            if not field_id:
+                continue
             field_map[field_id] = field_name
             headers_row.append(field_name)
 
@@ -459,8 +575,8 @@ def _fetch_bitable_data(url: str, app_id: str, app_secret: str, auditable_only: 
             app_token = path_parts[i + 1]
             break
 
-    query_params = parse_qs(parsed.query)
-    table_id = query_params.get('table', [None])[0]
+        query_params = parse_qs(parsed.query)
+        table_id = _first_query_value(query_params, "table")
 
     if not app_token:
         raise ValueError("无法从URL中提取app_token")
@@ -502,7 +618,7 @@ def _fetch_sheets_data(url: str, app_id: str, app_secret: str, auditable_only: b
 
         sheets = meta_data["data"]["sheets"]
         query_params = parse_qs(urlparse(url).query)
-        requested_table_id = query_params.get("table", [None])[0]
+        requested_table_id = _first_query_value(query_params, "table")
 
         # 对于嵌入在 Sheets 中的 Bitable block，真实数据必须走 Bitable API。
         if requested_table_id:
@@ -565,27 +681,31 @@ def _fetch_sheets_data(url: str, app_id: str, app_secret: str, auditable_only: b
             raise ValueError("表格数据为空")
 
         # 转换为字典格式
-        headers_row = raw_values[0]
+        headers_row = []
+        for idx, header in enumerate(raw_values[0]):
+            header_text = _cell_text(header)
+            headers_row.append(header_text or f"列{idx + 1}")
         data_rows = []
 
         for i, row in enumerate(raw_values[1:], 1):
             row_dict = {"_row_index": i + 1}  # 1-based行号
 
             for j, header in enumerate(headers_row):
+                header_key = header or f"列{j + 1}"
                 if j < len(row):
                     cell_data = row[j]
                     if isinstance(cell_data, dict):
                         # 处理富文本或链接
                         if "text" in cell_data:
-                            row_dict[header] = cell_data["text"]
+                            row_dict[header_key] = cell_data["text"]
                         elif "link" in cell_data:
-                            row_dict[header] = cell_data["link"]
+                            row_dict[header_key] = cell_data["link"]
                         else:
-                            row_dict[header] = str(cell_data)
+                            row_dict[header_key] = str(cell_data)
                     else:
-                        row_dict[header] = str(cell_data) if cell_data is not None else ""
+                        row_dict[header_key] = _cell_text(cell_data)
                 else:
-                    row_dict[header] = ""
+                    row_dict[header_key] = ""
 
             data_rows.append(row_dict)
 
@@ -958,6 +1078,72 @@ def fetch_feishu_content(url: str, app_id: str, app_secret: str) -> str:
         return ""
 
 
+def fetch_feishu_doc_images(url: str, app_id: str, app_secret: str,
+                            output_dir: Optional[str] = None) -> Dict[str, Any]:
+    """Download image assets embedded in a Feishu docx/wiki document."""
+    resolved_url = resolve_feishu_doc_url(url)
+    if not resolved_url:
+        return {"url": "", "image_paths": [], "errors": ["无法解析飞书文档链接"]}
+
+    try:
+        token = get_feishu_token(app_id, app_secret)
+        if not token:
+            return {"url": resolved_url, "image_paths": [], "errors": ["获取飞书访问令牌失败"]}
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+        docx_token, _ = _resolve_feishu_docx_identity(resolved_url, headers)
+        if not docx_token:
+            return {"url": resolved_url, "image_paths": [], "errors": ["无法解析文档 token"]}
+
+        blocks_result = _fetch_feishu_doc_blocks(docx_token, headers)
+        if blocks_result.get("errors"):
+            return {
+                "url": resolved_url,
+                "image_paths": [],
+                "errors": blocks_result["errors"],
+            }
+
+        file_tokens = _extract_docx_image_tokens_from_blocks(blocks_result.get("blocks") or [])
+        logger.info("Extracted %s candidate image tokens from doc %s", len(file_tokens), docx_token)
+        if not file_tokens:
+            return {"url": resolved_url, "image_paths": [], "errors": []}
+
+        if output_dir is None:
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            output_dir = os.path.join(base_dir, "results", "feishu_images", docx_token)
+        os.makedirs(output_dir, exist_ok=True)
+
+        image_paths = []
+        errors = []
+        for index, file_token in enumerate(file_tokens, start=1):
+            tmp_url = _get_feishu_tmp_download_url(file_token, headers)
+            if not tmp_url:
+                errors.append(f"图片素材下载地址获取失败: {file_token}")
+                continue
+
+            try:
+                download_response = http_requests.get(tmp_url, timeout=30)
+                if download_response.status_code != 200:
+                    errors.append(f"图片下载失败 {file_token}: HTTP {download_response.status_code}")
+                    continue
+                content_type = download_response.headers.get("Content-Type", "").split(";")[0].strip()
+                suffix = mimetypes.guess_extension(content_type) or ".png"
+                local_path = os.path.join(output_dir, f"image_{index:03d}{suffix}")
+                with open(local_path, "wb") as image_file:
+                    image_file.write(download_response.content)
+                image_paths.append(local_path)
+            except Exception as exc:  # pragma: no cover - network issues are environmental
+                errors.append(f"图片下载异常 {file_token}: {exc}")
+
+        return {"url": resolved_url, "image_paths": image_paths, "errors": errors}
+    except Exception as e:
+        logger.error(f"Failed to fetch doc images from {resolved_url}: {e}")
+        return {"url": resolved_url, "image_paths": [], "errors": [str(e)]}
+
+
 def download_feishu_doc_snapshot(url: str, app_id: str, app_secret: str, output_dir: Optional[str] = None) -> Dict[str, str]:
     """抓取飞书文档正文并缓存到本地文本文件。
 
@@ -989,6 +1175,173 @@ def download_feishu_doc_snapshot(url: str, app_id: str, app_secret: str, output_
 
     logger.info(f"Cached Feishu document snapshot: {resolved_url} -> {local_path}")
     return {"url": resolved_url, "content": content, "local_path": local_path}
+
+
+def _resolve_feishu_docx_identity(url: str, headers: Dict[str, str]) -> Tuple[str, str]:
+    """Resolve a doc or wiki URL to a docx token and optional wiki title."""
+    doc_id = None
+    is_wiki = False
+
+    if '/docx/' in url:
+        doc_id = url.split('/docx/')[1].split('?')[0].split('#')[0]
+    elif '/wiki/' in url:
+        doc_id = url.split('/wiki/')[1].split('?')[0].split('#')[0]
+        is_wiki = True
+
+    if not doc_id:
+        return "", ""
+
+    if not is_wiki:
+        return doc_id, ""
+
+    node_result = None
+    wiki_title = ""
+    node_api_url = f"https://open.feishu.cn/open-apis/wiki/v2/nodes/{doc_id}"
+    node_response = http_requests.get(node_api_url, headers=headers, timeout=15)
+
+    if node_response.status_code == 200:
+        candidate = node_response.json()
+        if candidate.get("code") == 0:
+            node_result = candidate
+    else:
+        logger.warning("Wiki node API returned HTTP %s, falling back to spaces/get_node", node_response.status_code)
+
+    if node_result is None:
+        fallback_api_url = "https://open.feishu.cn/open-apis/wiki/v2/spaces/get_node"
+        fallback_response = http_requests.get(
+            fallback_api_url,
+            headers=headers,
+            params={"token": doc_id},
+            timeout=15,
+        )
+        if fallback_response.status_code != 200:
+            return "", ""
+        candidate = fallback_response.json()
+        if candidate.get("code") != 0:
+            return "", ""
+        node_result = candidate
+
+    node_data = node_result.get("data", {}).get("node", {})
+    wiki_title = str(node_data.get("title") or "").strip()
+    return str(node_data.get("obj_token") or "").strip(), wiki_title
+
+
+def _get_feishu_tmp_download_url(file_token: str, headers: Dict[str, str]) -> str:
+    download_url = "https://open.feishu.cn/open-apis/drive/v1/medias/batch_get_tmp_download_url"
+    response = http_requests.get(
+        download_url,
+        headers=headers,
+        params={"file_tokens": file_token},
+        timeout=20,
+    )
+    if response.status_code != 200:
+        logger.warning("Feishu media tmp download API returned HTTP %s for token=%s", response.status_code, file_token)
+        return ""
+    result = response.json()
+    if result.get("code") != 0:
+        logger.warning("Feishu media tmp download API failed for token=%s: %s", file_token, result.get("msg"))
+        return ""
+    items = result.get("data", {}).get("tmp_download_urls") or []
+    if not items:
+        return ""
+    return str(items[0].get("tmp_download_url") or "").strip()
+
+
+def _extract_docx_image_tokens(docx_data: Dict[str, Any]) -> List[str]:
+    """Best-effort extraction of image file tokens from docx block payload."""
+    tokens: List[str] = []
+    candidate_keys = ("file_token", "image_token", "src_token", "token")
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, dict):
+            # Common Feishu shape: {"image": {... file_token ...}}
+            if "image" in node and isinstance(node.get("image"), dict):
+                image_data = node["image"]
+                for key in candidate_keys:
+                    value = str(image_data.get(key) or "").strip()
+                    if _looks_like_media_token(value):
+                        tokens.append(value)
+                        break
+
+            # Fallback: some docx payloads place token fields directly on the block
+            # or inside nested media structures rather than under `image`.
+            for key in candidate_keys:
+                value = str(node.get(key) or "").strip()
+                if _looks_like_media_token(value):
+                    lower_keys = {str(k).lower() for k in node.keys()}
+                    if (
+                        "image" in lower_keys
+                        or "block_type" in lower_keys
+                        or any("image" in name or "media" in name or "file" in name for name in lower_keys)
+                    ):
+                        tokens.append(value)
+            for value in node.values():
+                _walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(docx_data.get("document", {}).get("body", {}).get("blocks", []))
+    deduped = []
+    for token in tokens:
+        if token and token not in deduped:
+            deduped.append(token)
+    return deduped
+
+
+def _extract_docx_image_tokens_from_blocks(blocks: List[Dict[str, Any]]) -> List[str]:
+    wrapped = {"document": {"body": {"blocks": blocks}}}
+    return _extract_docx_image_tokens(wrapped)
+
+
+def _fetch_feishu_doc_blocks(docx_token: str, headers: Dict[str, str]) -> Dict[str, Any]:
+    """Fetch all docx blocks via the official blocks API."""
+    blocks = []
+    page_token = ""
+    errors: List[str] = []
+
+    for _ in range(20):
+        params = {"page_size": 500}
+        if page_token:
+            params["page_token"] = page_token
+
+        response = http_requests.get(
+            f"https://open.feishu.cn/open-apis/docx/v1/documents/{docx_token}/blocks",
+            headers=headers,
+            params=params,
+            timeout=20,
+        )
+        if response.status_code != 200:
+            errors.append(f"文档 blocks 接口返回 HTTP {response.status_code}")
+            break
+
+        payload = response.json()
+        if payload.get("code") != 0:
+            errors.append(f"文档 blocks 接口报错: {payload.get('msg', 'Unknown error')}")
+            break
+
+        data = payload.get("data", {})
+        page_items = data.get("items") or []
+        blocks.extend(page_items)
+
+        has_more = bool(data.get("has_more"))
+        page_token = str(data.get("page_token") or "")
+        if not has_more:
+            break
+    else:
+        errors.append("文档 blocks 分页超过上限，已中止")
+
+    logger.info("Fetched %s doc blocks for %s", len(blocks), docx_token)
+    return {"blocks": blocks, "errors": errors}
+
+
+def _looks_like_media_token(value: str) -> bool:
+    if not value:
+        return False
+    if not re.fullmatch(r"[A-Za-z0-9_-]{10,}", value):
+        return False
+    # Exclude obviously non-media scalar values that happen to use token field names.
+    return not value.lower().startswith(("wiki", "docx", "sheet", "table", "view"))
 
 
 def _extract_docx_text(docx_data: Dict[str, Any]) -> str:

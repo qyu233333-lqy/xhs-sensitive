@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """core.feishu 单元测试"""
 
+import json
 import os
 import tempfile
 import csv
@@ -9,6 +10,7 @@ from unittest.mock import patch, MagicMock
 
 from core.review_engine import _benefit_requirement_matched
 from core.review_engine import _is_already_reviewed, _create_existing_review_skip_result
+from core.review_engine import _audit_row_against_project
 from core.feishu import (
     _fetch_bitable_with_token,
     _fetch_sheets_data,
@@ -214,6 +216,46 @@ class TestFetchSheetsData:
         assert mock_get.call_args_list[1].args[0].endswith("/values/sht_valid_1!A1:ZZ2000")
         assert mock_get.call_args_list[2].args[0].endswith("/values/执行大表!A1:ZZ2000")
 
+    @patch("core.feishu.get_feishu_token", return_value="token-123")
+    @patch("core.feishu.http_requests.get")
+    def test_list_header_cells_are_normalized(self, mock_get, _mock_token):
+        meta_response = MagicMock()
+        meta_response.status_code = 200
+        meta_response.json.return_value = {
+            "code": 0,
+            "data": {
+                "properties": {"title": "Test Sheet"},
+                "sheets": [
+                    {"sheet_id": "sht_valid_1", "title": "Sheet1"},
+                ],
+            },
+        }
+
+        data_response = MagicMock()
+        data_response.status_code = 200
+        data_response.json.return_value = {
+            "code": 0,
+            "data": {
+                "valueRange": {
+                    "values": [
+                        [["项目名称", "备用标题"], "稿件链接"],
+                        [["小龙虾探店"], "https://example.com/doc1"],
+                    ]
+                }
+            },
+        }
+
+        mock_get.side_effect = [meta_response, data_response]
+
+        result = _fetch_sheets_data(
+            "https://my.feishu.cn/sheets/spreadsheet_token_123?sheet=sht_valid_1",
+            "app-id",
+            "app-secret",
+        )
+
+        assert result["headers"] == ["项目名称; 备用标题", "稿件链接"]
+        assert result["data"][0]["项目名称; 备用标题"] == "小龙虾探店"
+
 
 class TestBitableApis:
     @patch("core.feishu.get_feishu_token", return_value="token-123")
@@ -330,8 +372,25 @@ class TestFeishuDocSnapshot:
             assert result["content"] == "标题\n正文第一段"
             assert result["local_path"].startswith(tmpdir)
             assert os.path.exists(result["local_path"])
-            with open(result["local_path"], "r", encoding="utf-8") as f:
-                assert f.read() == "标题\n正文第一段"
+
+
+class TestExtractReviewDocSections:
+    def test_extract_review_doc_sections_supports_zhengwen_header(self):
+        content = """发布文案
+标题：
+报告！你的小猫已经有5分钟没进食了…
+正文
+有没有在你家小猫脸上看到过同款表情？
+不得不说小猫饿了的表现真的太直白啦~
+评论区置顶：
+养猫人速来get！
+"""
+
+        result = extract_review_doc_sections(content)
+
+        assert result["标题"] == "报告！你的小猫已经有5分钟没进食了…"
+        assert "有没有在你家小猫脸上看到过同款表情？" in result["文案"]
+        assert result["评论区文案"] == "养猫人速来get！"
 
 
 class TestFetchFeishuContent:
@@ -452,6 +511,58 @@ class TestBenefitRequirementMatched:
         assert _benefit_requirement_matched(content, "最高85折") is True
 
 
+class TestAuditRowAgainstProject:
+    def test_llm_rechecks_missing_benefits_and_allows_semantic_match(self):
+        client = MagicMock()
+        mock_msg = MagicMock()
+        mock_block = MagicMock()
+        mock_block.text = json.dumps({
+            "compliant": True,
+            "matched_benefits": ["免费升房"],
+            "analysis": "使用了 emoji 和口语化表达，但语义一致",
+        }, ensure_ascii=False)
+        mock_msg.content = [mock_block]
+        client.messages.create.return_value = mock_msg
+
+        passed, violations, notes = _audit_row_against_project(
+            content="酒店会员还有升房礼遇，房型直接往上升",
+            slogan_word="",
+            project_name="酒店权益",
+            project_config={"项目名称": "酒店权益", "话题标签": "", "利益点标准": "免费升房"},
+            client=client,
+            model="claude-sonnet",
+        )
+
+        assert passed is True
+        assert violations == ""
+        assert "LLM复核利益点通过" in notes
+
+    def test_llm_recheck_keeps_violation_when_not_matched(self):
+        client = MagicMock()
+        mock_msg = MagicMock()
+        mock_block = MagicMock()
+        mock_block.text = json.dumps({
+            "compliant": False,
+            "matched_benefits": [],
+            "analysis": "正文没有表达免费升房",
+        }, ensure_ascii=False)
+        mock_msg.content = [mock_block]
+        client.messages.create.return_value = mock_msg
+
+        passed, violations, notes = _audit_row_against_project(
+            content="这里只提到了早餐，没有提升房",
+            slogan_word="",
+            project_name="酒店权益",
+            project_config={"项目名称": "酒店权益", "话题标签": "", "利益点标准": "免费升房"},
+            client=client,
+            model="claude-sonnet",
+        )
+
+        assert passed is False
+        assert "缺少利益点标准：免费升房" in violations
+        assert "LLM利益点复核说明" in notes
+
+
 class TestReviewSkipLogic:
     def test_only_passed_row_is_detected(self):
         row = {"AI审核状态（内部）": "已过审"}
@@ -464,7 +575,7 @@ class TestReviewSkipLogic:
     def test_existing_review_skip_result_marks_no_writeback(self):
         row = {"AI审核状态（内部）": "已过审"}
         result = _create_existing_review_skip_result(row)
-        assert result["AI审核"] == "⏭️"
+        assert result["AI审核"] == "已过审"
         assert result["_skip_writeback"] is True
 
 

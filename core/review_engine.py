@@ -5,7 +5,7 @@ import logging
 import os
 import re
 import time
-from typing import Dict, List, Any, Generator
+from typing import Dict, List, Any, Generator, Optional
 
 import anthropic
 
@@ -14,16 +14,34 @@ from .project import get_project_config_exact_for_review
 from .feishu import (
     add_feishu_comment,
     download_feishu_doc_snapshot,
+    fetch_feishu_doc_images,
     fetch_feishu_content,
     write_bitable_records,
     write_feishu_sheet,
 )
-from .file_utils import save_results_to_excel, get_hyperlink_for_cell
+from .file_utils import format_audit_status_display, save_results_to_excel, get_hyperlink_for_cell
+from .image_audit import run_ocr_on_images
 
 logger = logging.getLogger(__name__)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_PDF = os.getenv("DEFAULT_PDF_PATH", os.path.join(BASE_DIR, "审核规则.pdf"))
+
+
+def _normalize_audit_status(value: Any) -> str:
+    """统一审核状态文本，兼容旧的图标状态值。"""
+    text = _cell_to_plain_text(value).strip()
+    mapping = {
+        "✅": "已过审",
+        "❌": "未过审",
+        "⏭️": "跳过审核",
+        "已通过": "已过审",
+        "未通过": "未过审",
+        "跳过": "跳过审核",
+        "通过": "已过审",
+        "审核通过": "已过审",
+    }
+    return mapping.get(text, text)
 
 
 def get_rules() -> str:
@@ -63,6 +81,13 @@ def process_review_task(task_data: Dict[str, Any]) -> Generator[Dict[str, Any], 
         ai_profile = resolve_ai_profile(config, task_data.get("profile_id"))
         if not ai_profile.get("api_key"):
             raise ValueError("缺少API密钥配置")
+        requester = task_data.get("requested_by") or {}
+        logger.info(
+            "Starting review task: task_id=%s requester=%s profile=%s",
+            task_data.get("task_id"),
+            requester.get("display_name") or "local",
+            ai_profile.get("id"),
+        )
 
         # 初始化Anthropic客户端
         client_kwargs = {"api_key": ai_profile["api_key"]}
@@ -172,36 +197,30 @@ def _process_row(client, model: str, row: Dict[str, Any], task_data: Dict[str, A
         )
 
         # 获取内容。优先读取稿件链接中的飞书文档，若为空则回退到表格中的标题/文案/评论区文案。
+        resolved_link_url = _resolve_review_link_url(row, task_data, content_link)
         content_parts = []
-        if content_link:
-            if task_data["type"] == "feishu_url" and any(domain in content_link for domain in ["feishu.cn", "larksuite.com"]):
+        image_paths: List[str] = []
+        image_fetch_errors: List[str] = []
+        if resolved_link_url:
+            if any(domain in resolved_link_url for domain in ["feishu.cn", "larksuite.com"]):
                 snapshot = download_feishu_doc_snapshot(
-                    content_link,
+                    resolved_link_url,
                     config.get("feishu_app_id", ""),
                     config.get("feishu_app_secret", "")
                 )
                 linked_content = snapshot.get("content", "")
                 if linked_content.strip():
                     content_parts.append(linked_content)
-            elif task_data["type"] == "excel_upload":
-                hyperlinks = task_data["data"].get("hyperlinks", {})
-                hyperlink_url = get_hyperlink_for_cell(
-                    hyperlinks,
-                    row.get("_row_index", 1),
-                    "稿件链接",
-                    task_data["data"]["headers"]
+
+                image_bundle = fetch_feishu_doc_images(
+                    resolved_link_url,
+                    config.get("feishu_app_id", ""),
+                    config.get("feishu_app_secret", ""),
                 )
-                if hyperlink_url and any(domain in hyperlink_url for domain in ["feishu.cn", "larksuite.com"]):
-                    snapshot = download_feishu_doc_snapshot(
-                        hyperlink_url,
-                        config.get("feishu_app_id", ""),
-                        config.get("feishu_app_secret", "")
-                    )
-                    linked_content = snapshot.get("content", "")
-                    if linked_content.strip():
-                        content_parts.append(linked_content)
-                else:
-                    content_parts.append(content_link)
+                image_paths = image_bundle.get("image_paths") or []
+                image_fetch_errors = image_bundle.get("errors") or []
+            else:
+                content_parts.append(resolved_link_url)
 
         for field_name in ["标题", "文案", "评论区文案", "稿件链接"]:
             text = _cell_to_plain_text(row.get(field_name)).strip()
@@ -214,27 +233,43 @@ def _process_row(client, model: str, row: Dict[str, Any], task_data: Dict[str, A
                 deduped_parts.append(part)
         content = "\n\n".join(deduped_parts)
 
-        if raw_link_text and not content_link and not content.strip():
+        if raw_link_text and not resolved_link_url and not content.strip():
             return _create_error_result(row, "稿件链接列不是可访问的飞书文档链接，无法读取文章内容")
 
         if not content.strip():
             return _create_empty_content_result(row)
 
+        # 文字审核先独立完成，图片 OCR 只作为补充信息，失败则直接跳过。
+        ocr_result = run_ocr_on_images(image_paths)
+        image_text = str(ocr_result.get("merged_text") or "").strip()
+        combined_content = content if not image_text else f"{content}\n\n[图片OCR]\n{image_text}"
+
         project_config = get_project_config_exact_for_review(project_name) if project_name else None
         overall_passed, violations, audit_notes = _audit_row_against_project(
-            content=content,
+            content=combined_content,
             slogan_word=slogan_word,
             project_name=project_name,
             project_config=project_config,
+            client=client,
+            model=model,
+        )
+
+        audit_notes = _append_image_audit_notes(
+            audit_notes,
+            image_paths=image_paths,
+            image_text=image_text,
+            image_fetch_errors=image_fetch_errors,
+            ocr_result=ocr_result,
         )
 
         # 构建结果
         result = row.copy()
         result["稿件内容"] = content[:500] + "..." if len(content) > 500 else content
-        result["AI审核"] = "✅" if overall_passed else "❌"
+        result["图片OCR内容"] = image_text[:500] + "..." if len(image_text) > 500 else image_text
+        result["AI审核"] = "已过审" if overall_passed else "未过审"
         result["AI审核状态（内部）"] = "已过审" if overall_passed else "未过审"
         result["违规原因"] = violations
-        result["审核备注"] = audit_notes
+        result["审核备注"] = "已过审" if overall_passed else audit_notes
         result["处理时间"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
         # 如果审核失败，添加飞书评论（如果配置了飞书）
@@ -298,7 +333,7 @@ def _create_empty_content_result(row: Dict[str, Any]) -> Dict[str, Any]:
     """创建空内容的审核结果"""
     result = row.copy()
     result["稿件内容"] = ""
-    result["AI审核"] = "⏭️"
+    result["AI审核"] = "跳过审核"
     result["AI审核状态（内部）"] = "跳过审核"
     result["违规原因"] = ""
     result["审核备注"] = "内容为空，跳过审核"
@@ -310,8 +345,8 @@ def _create_existing_review_skip_result(row: Dict[str, Any]) -> Dict[str, Any]:
     """对已审核稿件直接跳过，并禁止写回覆盖原状态。"""
     result = row.copy()
     result["稿件内容"] = ""
-    result["AI审核"] = "⏭️"
-    result["AI审核状态（内部）"] = row.get("AI审核状态（内部）") or row.get("AI审核") or "已审核"
+    result["AI审核"] = _normalize_audit_status(row.get("AI审核状态（内部）") or row.get("AI审核") or "已审核")
+    result["AI审核状态（内部）"] = _normalize_audit_status(row.get("AI审核状态（内部）") or row.get("AI审核") or "已审核")
     result["违规原因"] = ""
     result["审核备注"] = "已审核：跳过"
     result["处理时间"] = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -323,7 +358,7 @@ def _create_error_result(row: Dict[str, Any], error_msg: str) -> Dict[str, Any]:
     """创建错误情况的审核结果"""
     result = row.copy()
     result["稿件内容"] = ""
-    result["AI审核"] = "❌"
+    result["AI审核"] = "未过审"
     result["AI审核状态（内部）"] = "未过审"
     result["违规原因"] = ""
     result["审核备注"] = f"处理失败: {error_msg}"
@@ -387,6 +422,19 @@ def _save_results(task_data: Dict[str, Any], results: List[Dict[str, Any]], conf
         raise
 
 
+def _find_header_index(headers: List[str], exact_candidates: List[str], fuzzy_candidates: List[str]) -> Optional[int]:
+    """按优先级查找目标列索引，优先精确匹配。"""
+    for candidate in exact_candidates:
+        if candidate in headers:
+            return headers.index(candidate)
+
+    for i, header in enumerate(headers):
+        if any(candidate in header for candidate in fuzzy_candidates):
+            return i
+
+    return None
+
+
 def _write_back_to_feishu(task_data: Dict[str, Any], results: List[Dict[str, Any]], config: Dict[str, Any]):
     """将结果写回飞书表格"""
     try:
@@ -408,15 +456,10 @@ def _write_back_to_feishu(task_data: Dict[str, Any], results: List[Dict[str, Any
         violation_col = None
         notes_col = None
 
-        for i, header in enumerate(headers):
-            if "AI审核状态（内部）" in header:
-                ai_audit_internal_col = i
-            elif "AI审核" in header or "审核结果" in header:
-                ai_audit_col = i
-            elif "违规" in header or "原因" in header:
-                violation_col = i
-            elif "备注" in header or "说明" in header:
-                notes_col = i
+        ai_audit_internal_col = _find_header_index(headers, ["AI审核状态（内部）"], ["AI审核状态（内部）"])
+        ai_audit_col = _find_header_index(headers, ["AI审核", "审核结果"], ["AI审核", "审核结果"])
+        violation_col = _find_header_index(headers, ["违规原因"], ["违规", "原因"])
+        notes_col = _find_header_index(headers, ["审核备注"], ["备注", "说明"])
 
         # 如果没有找到任何审核列，跳过写回
         if ai_audit_internal_col is None and ai_audit_col is None:
@@ -433,16 +476,7 @@ def _write_back_to_feishu(task_data: Dict[str, Any], results: List[Dict[str, Any
             if ai_audit_internal_col is not None:
                 col_letter = chr(65 + ai_audit_internal_col)
                 range_ref = f"{col_letter}{row_index}"
-                # 将符号转换为文字状态
-                audit_status = result.get("AI审核", "")
-                if audit_status == "✅":
-                    status_text = "已过审"
-                elif audit_status == "❌":
-                    status_text = "未过审"
-                elif audit_status == "⏭️":
-                    status_text = "跳过审核"
-                else:
-                    status_text = "未知状态"
+                status_text = _normalize_audit_status(result.get("AI审核", "")) or "未知状态"
 
                 updates.append({
                     "range": range_ref,
@@ -511,19 +545,17 @@ def _write_back_to_bitable(sheet_data: Dict[str, Any], results: List[Dict[str, A
         if not record_id:
             continue
 
-        audit_status = result.get("AI审核", "")
-        if audit_status == "✅":
-            status_text = "已过审"
-        elif audit_status == "❌":
-            status_text = "未过审"
-        elif audit_status == "⏭️":
-            status_text = "跳过审核"
-        else:
-            status_text = "未知状态"
+        status_text = _normalize_audit_status(result.get("AI审核", "")) or "未知状态"
+
+        fields = {"AI审核状态（内部）": status_text}
+        if "审核备注" in headers and result.get("审核备注"):
+            fields["审核备注"] = result.get("审核备注", "")
+        if "违规原因" in headers and result.get("违规原因"):
+            fields["违规原因"] = result.get("违规原因", "")
 
         updates.append({
             "record_id": record_id,
-            "fields": {"AI审核状态（内部）": status_text}
+            "fields": fields
         })
 
     if not updates:
@@ -567,6 +599,21 @@ def _extract_url_from_cell(value: Any) -> str:
     return match.group(0) if match else ""
 
 
+def _resolve_review_link_url(row: Dict[str, Any], task_data: Dict[str, Any], content_link: str) -> str:
+    """Resolve the best review link URL for the current row."""
+    if task_data["type"] == "excel_upload":
+        hyperlinks = task_data["data"].get("hyperlinks", {})
+        hyperlink_url = get_hyperlink_for_cell(
+            hyperlinks,
+            row.get("_row_index", 1),
+            "稿件链接",
+            task_data["data"]["headers"],
+        )
+        if hyperlink_url:
+            return hyperlink_url
+    return content_link
+
+
 def _is_already_reviewed(row: Dict[str, Any]) -> bool:
     """判断稿件是否已过审，已过审才跳过。"""
     audit_values = [
@@ -575,7 +622,7 @@ def _is_already_reviewed(row: Dict[str, Any]) -> bool:
         _cell_to_plain_text(row.get("审核结果")).strip(),
     ]
     for value in audit_values:
-        if value and "已过审" in value:
+        if _normalize_audit_status(value) == "已过审":
             return True
     return False
 
@@ -649,10 +696,66 @@ def _split_benefit_requirements(text: str) -> List[str]:
     return items
 
 
+def _llm_recheck_benefits(client, model: str, content: str, missing_benefits: List[str]) -> Dict[str, Any]:
+    """仅在规则未匹配到利益点时，使用 LLM 做语义复核。"""
+    if not client or not model or not content.strip() or not missing_benefits:
+        return {"compliant": False, "matched_benefits": [], "analysis": ""}
+
+    prompt = f"""你是一个严格但理解自然语言变体的审核员。请判断下面稿件是否已经表达了要求的利益点。
+
+稿件全文：
+{content}
+
+待确认的利益点标准：
+{chr(10).join([f"- {item}" for item in missing_benefits])}
+
+判断要求：
+1. 只判断“利益点是否已经表达”，不要审别的内容。
+2. 允许谐音、emoji、口语化、省略写法、近义表达。
+3. 只有在用户普通理解下能明确对应到该利益点时，才算匹配。
+4. 不要因为项目名或标签相近就误判为匹配。
+
+请只返回 JSON：
+{{
+  "compliant": true/false,
+  "matched_benefits": ["已确认命中的利益点标准"],
+  "analysis": "简短说明"
+}}"""
+
+    try:
+        msg = client.messages.create(
+            model=model,
+            max_tokens=800,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        result_text = msg.content[0].text.strip()
+        if result_text.startswith("```json"):
+            result_text = result_text.replace("```json", "").replace("```", "").strip()
+        elif result_text.startswith("```"):
+            result_text = result_text.replace("```", "").strip()
+
+        result = json.loads(result_text)
+        matched = result.get("matched_benefits") or []
+        if not isinstance(matched, list):
+            matched = [str(matched)] if matched else []
+        return {
+            "compliant": bool(result.get("compliant")),
+            "matched_benefits": [str(item).strip() for item in matched if str(item).strip()],
+            "analysis": str(result.get("analysis") or "").strip(),
+        }
+    except Exception as e:
+        logger.warning(f"LLM benefit recheck failed: {e}")
+        return {"compliant": False, "matched_benefits": [], "analysis": str(e)}
+
+
 def _audit_row_against_project(content: str, slogan_word: str, project_name: str,
-                               project_config: Dict[str, Any] = None) -> tuple[bool, str, str]:
+                               project_config: Dict[str, Any] = None,
+                               client=None,
+                               model: str = "") -> tuple[bool, str, str]:
     """按项目名称和 CSV 规则做确定性审核。"""
     violations = []
+    missing_benefits = []
+    notes_parts: List[str] = []
 
     if not project_name:
         violations.append("项目名称为空，无法匹配审核标准")
@@ -669,22 +772,69 @@ def _audit_row_against_project(content: str, slogan_word: str, project_name: str
 
         for benefit in _split_benefit_requirements(project_config.get("利益点标准", "")):
             if not _benefit_requirement_matched(content, benefit):
+                missing_benefits.append(benefit)
                 violations.append(f"缺少利益点标准：{benefit}")
 
+        if missing_benefits:
+            llm_result = _llm_recheck_benefits(client, model, content, missing_benefits)
+            matched_benefits = set(llm_result.get("matched_benefits") or [])
+            if matched_benefits:
+                violations = [
+                    item for item in violations
+                    if not (
+                        item.startswith("缺少利益点标准：")
+                        and item.split("：", 1)[1].strip() in matched_benefits
+                    )
+                ]
+                notes_parts.append(
+                    "LLM复核利益点通过: " + "；".join(sorted(matched_benefits))
+                )
+            if llm_result.get("analysis"):
+                notes_parts.append(f"LLM利益点复核说明: {llm_result['analysis']}")
+
     passed = len(violations) == 0
-    notes = f"按项目“{project_name or '未知项目'}”审核通过" if passed else "；".join(violations)
+    if passed:
+        notes_parts.insert(0, f"按项目“{project_name or '未知项目'}”审核通过")
+    else:
+        notes_parts.insert(0, "；".join(violations))
+    notes = " | ".join([part for part in notes_parts if part])
     return passed, "；".join(violations), notes
+
+
+def _append_image_audit_notes(base_notes: str, image_paths: List[str], image_text: str,
+                              image_fetch_errors: List[str], ocr_result: Dict[str, Any]) -> str:
+    notes = [base_notes] if base_notes else []
+    ocr_errors = ocr_result.get("errors") or []
+    ocr_skip_reason = str(ocr_result.get("skip_reason") or "").strip()
+    ocr_available = bool(ocr_result.get("available", True))
+
+    if image_paths:
+        notes.append(f"图片审核: 共提取 {len(image_paths)} 张图片")
+    if image_text:
+        notes.append("图片审核: 已识别图片文字并纳入口令词/利益点/话题标签校验")
+    elif image_paths and ocr_skip_reason:
+        notes.append(f"图片审核: OCR已跳过（{ocr_skip_reason}），正文审核照常执行")
+    elif image_paths and ocr_available:
+        notes.append("图片审核: 已处理图片，但未识别到可用文字")
+    elif image_paths and not ocr_available:
+        notes.append("图片审核: OCR不可用，已跳过图片文字识别，正文审核照常执行")
+
+    if image_fetch_errors:
+        notes.append(f"图片下载异常: {'；'.join(image_fetch_errors[:3])}")
+    if ocr_errors and not ocr_skip_reason:
+        notes.append(f"图片OCR异常: {'；'.join(ocr_errors[:3])}")
+    return " | ".join([item for item in notes if item])
 
 
 def _format_result_item(result: Dict[str, Any], seq: int) -> Dict[str, Any]:
     """将内部结果转换为前端展示结构。"""
-    audit_state = result.get("AI审核", "")
-    skipped = audit_state == "⏭️"
+    audit_state = _normalize_audit_status(result.get("AI审核", ""))
+    skipped = audit_state == "跳过审核"
     if skipped:
         label = "跳过"
-    elif audit_state == "✅":
+    elif audit_state == "已过审":
         label = "已过审"
-    elif audit_state == "❌":
+    elif audit_state == "未过审":
         label = "未过审" if not str(result.get("审核备注", "")).startswith("处理失败:") else "审核出错"
     else:
         label = "审核出错"

@@ -1,0 +1,34 @@
+{
+  "users": [
+    {
+      "name": "审核管理员",
+      "display_name": "审核管理员",
+      "profile_id": "ops1",
+      "profile_label": "运营一部",
+      "is_admin": true,
+      "match": {
+        "userid": "manager_userid_from_dingtalk"
+      }
+    },
+    {
+      "name": "运营一部成员",
+      "display_name": "运营一部成员",
+      "profile_id": "ops1",
+      "profile_label": "运营一部",
+      "is_admin": false,
+      "match": {
+        "unionid": "member_unionid_from_dingtalk"
+      }
+    },
+    {
+      "name": "运营三部成员",
+      "display_name": "运营三部成员",
+      "profile_id": "ops3",
+      "profile_label": "运营三部",
+      "is_admin": false,
+      "match": {
+        "mobile": "13800000000"
+      }
+    }
+  ]
+}

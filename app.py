@@ -3,10 +3,12 @@
 
 import os
 import logging
+from datetime import timedelta
 from flask import Flask
 
 from routes.main import main_bp
 from routes.api import api_bp
+from core.config import load_config
 
 # 应用配置
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -35,6 +37,18 @@ def setup_logging():
 def create_app():
     """应用工厂函数"""
     app = Flask(__name__)
+    config = load_config()
+    app.secret_key = (
+        os.getenv("SESSION_SECRET")
+        or config.get("session_secret")
+        or "dev-session-secret-change-me"
+    )
+    app.config.update(
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+        SESSION_COOKIE_SECURE=False,
+        PERMANENT_SESSION_LIFETIME=timedelta(hours=8),
+    )
 
     # 注册蓝图
     app.register_blueprint(main_bp)

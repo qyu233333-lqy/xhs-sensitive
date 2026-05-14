@@ -3,12 +3,29 @@
 import json
 import logging
 import os
+import re
+import threading
 import time
 import uuid
 from datetime import datetime
-from flask import Blueprint, request, jsonify, Response
+from flask import Blueprint, request, jsonify, Response, redirect, session
 
-from core.config import get_key_profiles_metadata, load_config, resolve_ai_profile, save_config
+from core.auth import (
+    build_callback_redirect,
+    build_dingtalk_login_url,
+    clear_authenticated_user,
+    effective_profile_id,
+    exchange_code_for_user_token,
+    fetch_dingtalk_user_info,
+    get_auth_status,
+    get_current_user,
+    is_auth_enabled,
+    is_auth_ready,
+    login_required,
+    resolve_user_access,
+    store_authenticated_user,
+)
+from core.config import get_key_profiles_metadata, get_safe_auth_metadata, load_config, save_config
 from core.project import clear_project_configs_cache, load_project_configs, save_project_config
 from core.feishu import (
     download_feishu_doc_snapshot,
@@ -46,23 +63,162 @@ def safe_json_response(data, status=200):
         return jsonify({"error": "Internal server error"}), 500
 
 
+def _normalize_status_text(value: object) -> str:
+    """把飞书里各种状态文案压成可比较的文本。"""
+    text = str(value or "").strip()
+    return re.sub(r'[\s\u3000“”"\'：:，,。！？!?.、—\-（）()【】\[\]]+', '', text)
+
+
+def _is_approved_review_status(value: object) -> bool:
+    """识别“已通过/审核通过/通过/已过审”等多种通过状态。"""
+    normalized = _normalize_status_text(value)
+    if not normalized:
+        return False
+
+    negative_markers = ("未通过", "不通过", "未过审", "驳回", "待审核", "未审核")
+    if any(marker in normalized for marker in negative_markers):
+        return False
+
+    positive_markers = ("审核通过", "已通过", "已过审", "通过")
+    return any(marker in normalized for marker in positive_markers)
+
+
+def _write_bitable_updates_in_chunks(app_token: str, table_id: str, app_id: str, app_secret: str,
+                                     updates: list[dict], chunk_size: int = 100) -> bool:
+    """分批写回，降低大表单次请求失败概率。"""
+    if not updates:
+        return True
+
+    for start in range(0, len(updates), chunk_size):
+        chunk = updates[start:start + chunk_size]
+        success = write_bitable_records(app_token, table_id, app_id, app_secret, chunk)
+        if not success:
+            return False
+    return True
+
+
+def _run_fill_approved_content(task_id: str) -> None:
+    task_data = _tasks[task_id]
+    fill_job = task_data.setdefault("fill_job", {})
+
+    try:
+        sheet_data = task_data["data"]
+        headers = set(sheet_data.get("headers", []))
+        config = load_config()
+        rows = sheet_data.get("data", [])
+        total_rows = len(rows)
+
+        fill_job.update({
+            "status": "running",
+            "total": total_rows,
+            "processed_rows": 0,
+            "updated": 0,
+            "skipped": 0,
+            "message": "开始回填通过稿件",
+            "error": "",
+        })
+
+        updates = []
+        processed = 0
+        skipped = 0
+
+        for idx, row in enumerate(rows, 1):
+            fill_job["processed_rows"] = idx
+
+            review_status = str(row.get("小题审核状态") or "").strip()
+            if not _is_approved_review_status(review_status):
+                skipped += 1
+                continue
+
+            record_id = row.get("_record_id")
+            link_value = row.get("稿件链接")
+            snapshot = download_feishu_doc_snapshot(
+                link_value,
+                config["feishu_app_id"],
+                config["feishu_app_secret"],
+            )
+            content = snapshot.get("content", "").strip()
+            if not record_id or not content:
+                skipped += 1
+                continue
+
+            sections = extract_review_doc_sections(content)
+            fields = {}
+            for field_name in ("标题", "文案", "评论区文案"):
+                value = str(sections.get(field_name) or "").strip()
+                if value:
+                    fields[field_name] = value
+
+            if not fields:
+                skipped += 1
+                continue
+
+            updates.append({"record_id": record_id, "fields": fields})
+            processed += 1
+            fill_job["updated"] = processed
+            fill_job["skipped"] = skipped
+            fill_job["message"] = f"正在回填 {idx}/{total_rows}"
+
+        if not updates:
+            fill_job.update({
+                "status": "completed",
+                "updated": 0,
+                "skipped": skipped,
+                "message": "没有找到可回填的已审核通过稿件",
+            })
+            return
+
+        success = _write_bitable_updates_in_chunks(
+            sheet_data.get("app_token") or sheet_data.get("spreadsheet_id"),
+            sheet_data["sheet_id"],
+            config["feishu_app_id"],
+            config["feishu_app_secret"],
+            updates,
+        )
+        if not success:
+            raise ValueError("回填飞书多维表格失败")
+
+        fill_job.update({
+            "status": "completed",
+            "updated": processed,
+            "skipped": skipped,
+            "message": f"已回填 {processed} 条稿件内容",
+        })
+    except Exception as e:
+        logger.error(f"Failed to fill approved content for task {task_id}: {e}")
+        fill_job.update({
+            "status": "failed",
+            "error": str(e),
+            "message": f"回填失败: {str(e)}",
+        })
+
+
 @api_bp.route("/config", methods=["GET", "POST"])
 def handle_config():
     """配置管理端点"""
     try:
+        config = load_config()
+        auth_enabled = is_auth_enabled(config)
+        current_user = get_current_user()
+        if auth_enabled and request.method == "POST":
+            if not current_user:
+                return safe_json_response({"error": "请先使用钉钉登录", "auth_required": True}, 401)
+            if not current_user.get("is_admin"):
+                return safe_json_response({"error": "需要管理员权限", "auth_required": True}, 403)
+
         if request.method == "GET":
-            config = load_config()
             profiles = config.get("key_profiles") or {}
             has_any_profile_key = any(
                 isinstance(profile, dict) and profile.get("api_key")
                 for profile in profiles.values()
             )
             # 隐藏敏感信息
-            safe_config = {k: v for k, v in config.items() if k not in ["api_key", "feishu_app_secret"]}
+            safe_config = {k: v for k, v in config.items() if k not in ["api_key", "feishu_app_secret", "session_secret"]}
             safe_config["has_api_key"] = bool(config.get("api_key")) or has_any_profile_key
             safe_config["has_feishu_secret"] = bool(config.get("feishu_app_secret"))
             safe_config["key_profiles"] = get_key_profiles_metadata(config)
             safe_config["default_profile_id"] = config.get("default_profile_id", "ops1")
+            safe_config["auth"] = get_safe_auth_metadata(config)
             return safe_json_response(safe_config)
 
         elif request.method == "POST":
@@ -70,13 +226,22 @@ def handle_config():
             if not data:
                 return safe_json_response({"error": "No data provided"}, 400)
 
-            config = load_config()
-
             # 更新配置
             for key, value in data.items():
                 if key in ["api_key", "base_url", "model", "feishu_app_id", "feishu_app_secret",
-                          "project_config_path", "project_config_feishu_url", "enable_project_audit"]:
+                          "project_config_path", "project_config_feishu_url", "enable_project_audit", "session_secret"]:
                     config[key] = value
+                elif key == "auth" and isinstance(value, dict):
+                    auth_config = config.get("auth") or {}
+                    for auth_key in [
+                        "enabled", "dingtalk_app_key", "dingtalk_app_secret",
+                        "dingtalk_redirect_uri", "dingtalk_scope", "user_mapping_path"
+                    ]:
+                        if auth_key in value:
+                            if auth_key == "dingtalk_app_secret" and not value[auth_key]:
+                                continue
+                            auth_config[auth_key] = value[auth_key]
+                    config["auth"] = auth_config
 
             # 验证飞书配置（如果提供）
             if config.get("feishu_app_id") and config.get("feishu_app_secret"):
@@ -104,6 +269,7 @@ def handle_config():
 
 
 @api_bp.route("/parse-url", methods=["POST"])
+@login_required()
 def parse_url():
     """解析飞书URL端点"""
     try:
@@ -112,7 +278,6 @@ def parse_url():
             return safe_json_response({"error": "缺少URL参数"}, 400)
 
         url = data["url"].strip()
-        profile_id = (data.get("profile_id") or "").strip() or None
         if not url:
             return safe_json_response({"error": "URL不能为空"}, 400)
 
@@ -137,7 +302,8 @@ def parse_url():
             "task_id": task_id,
             "type": "feishu_url",
             "url": url,
-            "profile_id": profile_id or config.get("default_profile_id") or "ops1",
+            "profile_id": effective_profile_id(config),
+            "requested_by": get_current_user(),
             "data": sheet_data,
             "status": "ready",
             "created_at": datetime.now().isoformat()
@@ -164,6 +330,7 @@ def parse_url():
 
 
 @api_bp.route("/upload", methods=["POST"])
+@login_required()
 def upload_file():
     """文件上传端点"""
     try:
@@ -202,7 +369,8 @@ def upload_file():
         task_data = {
             "task_id": task_id,
             "type": "excel_upload",
-            "profile_id": request.form.get("profile_id") or load_config().get("default_profile_id") or "ops1",
+            "profile_id": effective_profile_id(load_config()),
+            "requested_by": get_current_user(),
             "file_path": file_path,
             "original_filename": original_filename,
             "data": excel_data,
@@ -233,6 +401,14 @@ def get_project_configs():
     """获取项目配置列表"""
     try:
         if request.method == "POST":
+            config = load_config()
+            if is_auth_enabled(config):
+                current_user = get_current_user()
+                if not current_user:
+                    return safe_json_response({"error": "请先使用钉钉登录", "auth_required": True}, 401)
+                if not current_user.get("is_admin"):
+                    return safe_json_response({"error": "需要管理员权限", "auth_required": True}, 403)
+
             data = request.get_json() or {}
             saved = save_project_config({
                 "项目名称": data.get("project_name", ""),
@@ -298,6 +474,7 @@ def reload_project_configs():
 
 
 @api_bp.route("/review/<task_id>")
+@login_required()
 def start_review(task_id):
     """启动审核流程（SSE流）"""
     from core.review_engine import process_review_task
@@ -335,6 +512,7 @@ def start_review(task_id):
 
 
 @api_bp.route("/fill-approved-content/<task_id>", methods=["POST"])
+@login_required()
 def fill_approved_content(task_id):
     """将已通过小题审核的稿件链接内容回填到表格列。"""
     try:
@@ -359,75 +537,62 @@ def fill_approved_content(task_id):
         if not config.get("feishu_app_id") or not config.get("feishu_app_secret"):
             return safe_json_response({"error": "请先配置飞书应用信息"}, 400)
 
-        updates = []
-        processed = 0
-        skipped = 0
-
-        for row in sheet_data.get("data", []):
-            review_status = str(row.get("小题审核状态") or "").strip()
-            if "审核通过" not in review_status:
-                skipped += 1
-                continue
-
-            record_id = row.get("_record_id")
-            link_value = row.get("稿件链接")
-            snapshot = download_feishu_doc_snapshot(
-                link_value,
-                config["feishu_app_id"],
-                config["feishu_app_secret"],
-            )
-            content = snapshot.get("content", "").strip()
-            if not record_id or not content:
-                skipped += 1
-                continue
-
-            sections = extract_review_doc_sections(content)
-            fields = {}
-            for field_name in ("标题", "文案", "评论区文案"):
-                value = str(sections.get(field_name) or "").strip()
-                if value:
-                    fields[field_name] = value
-
-            if not fields:
-                skipped += 1
-                continue
-
-            updates.append({"record_id": record_id, "fields": fields})
-            processed += 1
-
-        if not updates:
+        fill_job = task_data.get("fill_job") or {}
+        if fill_job.get("status") == "running":
             return safe_json_response({
                 "success": True,
-                "updated": 0,
-                "skipped": skipped,
-                "message": "没有找到可回填的已审核通过稿件"
-            })
+                "async": True,
+                "task_id": task_id,
+                "status": "running",
+                "message": fill_job.get("message") or "回填任务进行中",
+            }, 202)
 
-        success = write_bitable_records(
-            sheet_data.get("app_token") or sheet_data.get("spreadsheet_id"),
-            sheet_data["sheet_id"],
-            config["feishu_app_id"],
-            config["feishu_app_secret"],
-            updates,
-        )
-        if not success:
-            return safe_json_response({"error": "回填飞书多维表格失败"}, 500)
+        task_data["fill_job"] = {
+            "status": "queued",
+            "total": len(sheet_data.get("data", [])),
+            "processed_rows": 0,
+            "updated": 0,
+            "skipped": 0,
+            "message": "回填任务已启动",
+            "error": "",
+            "created_at": datetime.now().isoformat(),
+        }
+        threading.Thread(target=_run_fill_approved_content, args=(task_id,), daemon=True).start()
 
         return safe_json_response({
             "success": True,
-            "updated": processed,
-            "skipped": skipped,
-            "message": f"已回填 {processed} 条稿件内容"
-        })
+            "async": True,
+            "task_id": task_id,
+            "status": "queued",
+            "message": "回填任务已启动，请等待处理完成",
+        }, 202)
 
     except Exception as e:
         logger.error(f"Failed to fill approved content for task {task_id}: {e}")
         return safe_json_response({"error": f"回填失败: {str(e)}"}, 500)
 
 
+@api_bp.route("/fill-approved-content/<task_id>/status", methods=["GET"])
+@login_required()
+def get_fill_approved_content_status(task_id):
+    try:
+        if task_id not in _tasks:
+            return safe_json_response({"error": "任务不存在"}, 404)
+
+        fill_job = (_tasks[task_id].get("fill_job") or {}).copy()
+        if not fill_job:
+            return safe_json_response({"error": "回填任务未启动"}, 404)
+        fill_job["task_id"] = task_id
+        return safe_json_response(fill_job)
+    except Exception as e:
+        logger.error(f"Failed to get fill task status for {task_id}: {e}")
+        return safe_json_response({"error": f"获取回填状态失败: {str(e)}"}, 500)
+
+
 
 
 @api_bp.route("/tasks/<task_id>/status")
+@login_required()
 def get_task_status(task_id):
     """获取任务状态"""
     try:
@@ -456,6 +621,20 @@ def get_key_profiles():
     """获取可供前端选择的部门配置，不返回真实密钥。"""
     try:
         config = load_config()
+        if is_auth_enabled(config):
+            current_user = get_current_user()
+            if not current_user:
+                return safe_json_response({"default_profile_id": "", "profiles": []})
+            return safe_json_response({
+                "default_profile_id": current_user.get("profile_id", ""),
+                "profiles": [{
+                    "id": current_user.get("profile_id"),
+                    "label": current_user.get("profile_label") or current_user.get("profile_id"),
+                    "has_key": True,
+                    "has_base_url": True,
+                    "model": "",
+                }],
+            })
         return safe_json_response({
             "default_profile_id": config.get("default_profile_id", "ops1"),
             "profiles": get_key_profiles_metadata(config),
@@ -463,3 +642,68 @@ def get_key_profiles():
     except Exception as e:
         logger.error(f"Failed to get key profiles: {e}")
         return safe_json_response({"error": f"获取部门配置失败: {str(e)}"}, 500)
+
+
+@api_bp.route("/auth/me", methods=["GET"])
+def auth_me():
+    try:
+        return safe_json_response(get_auth_status(load_config()))
+    except Exception as e:
+        logger.error(f"Failed to get auth status: {e}")
+        return safe_json_response({"error": f"获取登录状态失败: {str(e)}"}, 500)
+
+
+@api_bp.route("/auth/dingtalk/login", methods=["GET"])
+def auth_dingtalk_login():
+    try:
+        config = load_config()
+        if not is_auth_enabled(config):
+            return safe_json_response({"error": "钉钉登录未启用"}, 400)
+        if not is_auth_ready(config):
+            return safe_json_response({"error": "钉钉登录配置不完整"}, 503)
+        return redirect(build_dingtalk_login_url(config))
+    except Exception as e:
+        logger.error(f"Failed to start DingTalk login: {e}")
+        return redirect(build_callback_redirect("login_failed"))
+
+
+@api_bp.route("/auth/dingtalk/callback", methods=["GET"])
+def auth_dingtalk_callback():
+    try:
+        config = load_config()
+        if not is_auth_enabled(config):
+            return redirect(build_callback_redirect("auth_disabled"))
+
+        code = (request.args.get("code") or "").strip()
+        state = (request.args.get("state") or "").strip()
+        expected_state = session.pop("dingtalk_oauth_state", "")
+        if not code:
+            return redirect(build_callback_redirect("missing_code"))
+        if expected_state and state != expected_state:
+            return redirect(build_callback_redirect("state_mismatch"))
+
+        user_token = exchange_code_for_user_token(code, config)
+        user_info = fetch_dingtalk_user_info(user_token, config)
+        auth_user = resolve_user_access(user_info, config)
+        store_authenticated_user(auth_user)
+
+        logger.info(
+            "Authenticated DingTalk user: %s -> %s",
+            auth_user.get("display_name"),
+            auth_user.get("profile_id"),
+        )
+        return redirect(build_callback_redirect())
+    except PermissionError as e:
+        logger.warning(f"DingTalk user denied: {e}")
+        clear_authenticated_user()
+        return redirect(build_callback_redirect("unauthorized_user"))
+    except Exception as e:
+        logger.error(f"Failed to complete DingTalk login: {e}")
+        clear_authenticated_user()
+        return redirect(build_callback_redirect("login_failed"))
+
+
+@api_bp.route("/auth/logout", methods=["POST"])
+def auth_logout():
+    clear_authenticated_user()
+    return safe_json_response({"success": True})

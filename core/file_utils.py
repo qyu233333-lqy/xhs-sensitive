@@ -14,6 +14,19 @@ import openpyxl
 logger = logging.getLogger(__name__)
 
 
+def format_audit_status_display(value: Any) -> Any:
+    """把内部审核状态转换为适合表格显示的文字。"""
+    mapping = {
+        "✅": "已过审",
+        "❌": "未过审",
+        "⏭️": "跳过",
+        "已过审": "已过审",
+        "未过审": "未过审",
+        "跳过审核": "跳过",
+    }
+    return mapping.get(value, value)
+
+
 def sanitize_filename(filename: str) -> str:
     """安全化文件名，防止安全问题"""
     if not filename:

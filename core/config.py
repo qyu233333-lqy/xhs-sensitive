@@ -3,6 +3,7 @@
 import json
 import os
 import logging
+from copy import deepcopy
 from typing import Dict, Any
 
 logger = logging.getLogger(__name__)
@@ -19,8 +20,48 @@ def _default_key_profiles() -> Dict[str, Any]:
             "base_url": "",
             "model": "claude-opus-4-6",
             "enabled": True,
+        },
+        "ops3": {
+            "label": "运营三部",
+            "api_key": "",
+            "base_url": "",
+            "model": "claude-opus-4-6",
+            "enabled": True,
         }
     }
+
+
+def _default_auth_config() -> Dict[str, Any]:
+    return {
+        "enabled": False,
+        "provider": "dingtalk",
+        "dingtalk_app_key": "",
+        "dingtalk_app_secret": "",
+        "dingtalk_redirect_uri": "",
+        "dingtalk_scope": "openid",
+        "authorize_url": "https://login.dingtalk.com/oauth2/auth",
+        "user_access_token_url": "https://api.dingtalk.com/v1.0/oauth2/userAccessToken",
+        "user_info_url": "https://api.dingtalk.com/v1.0/contact/users/me",
+        "user_mapping_path": "user_groups.json",
+    }
+
+
+def _profile_env(profile_id: str, field_name: str) -> str:
+    suffix = "".join(ch if ch.isalnum() else "_" for ch in profile_id.upper())
+    mapping = {
+        "api_key": f"ANTHROPIC_API_KEY_{suffix}",
+        "base_url": f"API_BASE_URL_{suffix}",
+        "model": f"CLAUDE_MODEL_{suffix}",
+    }
+    return mapping[field_name]
+
+
+def _apply_nested_defaults(target: Dict[str, Any], defaults: Dict[str, Any]) -> None:
+    for key, default_value in defaults.items():
+        if key not in target:
+            target[key] = deepcopy(default_value)
+        elif isinstance(default_value, dict) and isinstance(target.get(key), dict):
+            _apply_nested_defaults(target[key], default_value)
 
 
 def load_config() -> Dict[str, Any]:
@@ -38,8 +79,10 @@ def load_config() -> Dict[str, Any]:
 
     # Set default values for new project audit configurations
     defaults = {
+        "session_secret": "",
         "default_profile_id": "ops1",
         "key_profiles": _default_key_profiles(),
+        "auth": _default_auth_config(),
         "project_config_path": "ref.csv",
         "enable_project_audit": True,
         "audit_modes": {
@@ -58,15 +101,17 @@ def load_config() -> Dict[str, Any]:
     # Apply defaults for missing keys
     for key, default_value in defaults.items():
         if key not in config:
-            config[key] = default_value
+            config[key] = deepcopy(default_value)
         elif key == "key_profiles" and isinstance(config[key], dict):
             for profile_id, profile_default in default_value.items():
                 if profile_id not in config[key]:
-                    config[key][profile_id] = profile_default
+                    config[key][profile_id] = deepcopy(profile_default)
                 elif isinstance(config[key][profile_id], dict):
                     for sub_key, sub_default in profile_default.items():
                         if sub_key not in config[key][profile_id]:
                             config[key][profile_id][sub_key] = sub_default
+        elif key == "auth" and isinstance(config[key], dict):
+            _apply_nested_defaults(config[key], default_value)
         elif key == "audit_modes" and isinstance(config[key], dict):
             # Merge audit_modes defaults
             for sub_key, sub_default in default_value.items():
@@ -87,6 +132,7 @@ def load_config() -> Dict[str, Any]:
         "FEISHU_APP_SECRET": "feishu_app_secret",
         "PROJECT_CONFIG_PATH": "project_config_path",
         "ENABLE_PROJECT_AUDIT": "enable_project_audit",
+        "SESSION_SECRET": "session_secret",
     }
 
     for env_var, config_key in env_mappings.items():
@@ -96,6 +142,33 @@ def load_config() -> Dict[str, Any]:
                 config[config_key] = env_value.lower() in ('true', '1', 'yes', 'on')
             else:
                 config[config_key] = env_value
+
+    auth_env_mappings = {
+        "DINGTALK_AUTH_ENABLED": ("enabled", "bool"),
+        "DINGTALK_APP_KEY": ("dingtalk_app_key", "str"),
+        "DINGTALK_APP_SECRET": ("dingtalk_app_secret", "str"),
+        "DINGTALK_REDIRECT_URI": ("dingtalk_redirect_uri", "str"),
+        "DINGTALK_SCOPE": ("dingtalk_scope", "str"),
+        "DINGTALK_AUTHORIZE_URL": ("authorize_url", "str"),
+        "DINGTALK_USER_ACCESS_TOKEN_URL": ("user_access_token_url", "str"),
+        "DINGTALK_USER_INFO_URL": ("user_info_url", "str"),
+        "DINGTALK_USER_MAPPING_PATH": ("user_mapping_path", "str"),
+    }
+    auth_config = config.get("auth") or {}
+    for env_var, (config_key, value_type) in auth_env_mappings.items():
+        env_value = os.getenv(env_var)
+        if not env_value:
+            continue
+        auth_config[config_key] = env_value.lower() in ("true", "1", "yes", "on") if value_type == "bool" else env_value
+    config["auth"] = auth_config
+
+    for profile_id, profile in (config.get("key_profiles") or {}).items():
+        if not isinstance(profile, dict):
+            continue
+        for field_name in ("api_key", "base_url", "model"):
+            env_value = os.getenv(_profile_env(profile_id, field_name))
+            if env_value:
+                profile[field_name] = env_value
 
     return config
 
@@ -108,12 +181,13 @@ def get_key_profiles_metadata(config: Dict[str, Any]) -> list[Dict[str, Any]]:
             continue
         if profile.get("enabled", True) is False:
             continue
+        resolved_profile = resolve_ai_profile(config, profile_id)
         profiles.append({
             "id": profile_id,
             "label": profile.get("label", profile_id),
-            "has_key": bool(profile.get("api_key")),
-            "has_base_url": bool(profile.get("base_url")),
-            "model": profile.get("model", ""),
+            "has_key": bool(resolved_profile.get("api_key")),
+            "has_base_url": bool(resolved_profile.get("base_url")),
+            "model": resolved_profile.get("model", ""),
         })
     return profiles
 
@@ -134,6 +208,21 @@ def resolve_ai_profile(config: Dict[str, Any], profile_id: str | None = None) ->
         "api_key": api_key,
         "base_url": base_url,
         "model": model,
+    }
+
+
+def get_safe_auth_metadata(config: Dict[str, Any]) -> Dict[str, Any]:
+    """返回可给前端使用的认证配置元数据，不包含密钥。"""
+    auth_config = config.get("auth") or {}
+    return {
+        "enabled": bool(auth_config.get("enabled")),
+        "provider": auth_config.get("provider", "dingtalk"),
+        "app_key": auth_config.get("dingtalk_app_key", ""),
+        "has_app_key": bool(auth_config.get("dingtalk_app_key")),
+        "has_app_secret": bool(auth_config.get("dingtalk_app_secret")),
+        "redirect_uri": auth_config.get("dingtalk_redirect_uri", ""),
+        "scope": auth_config.get("dingtalk_scope", "openid"),
+        "user_mapping_path": auth_config.get("user_mapping_path", "user_groups.json"),
     }
 
 
