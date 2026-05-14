@@ -45,13 +45,55 @@ api_bp = Blueprint('api', __name__, url_prefix='/api')
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 RESULT_DIR = os.path.join(BASE_DIR, "results")
+TASK_DIR = os.path.join(RESULT_DIR, "tasks")
 
 # 确保目录存在
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(RESULT_DIR, exist_ok=True)
+os.makedirs(TASK_DIR, exist_ok=True)
 
 # 任务存储
 _tasks = {}
+
+
+def _task_file_path(task_id: str) -> str:
+    return os.path.join(TASK_DIR, f"{task_id}.json")
+
+
+def _save_task(task_data: dict) -> None:
+    task_id = str(task_data["task_id"])
+    _tasks[task_id] = task_data
+
+    path = _task_file_path(task_id)
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(task_data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, path)
+
+
+def _load_task(task_id: str) -> dict | None:
+    cached = _tasks.get(task_id)
+    if cached:
+        return cached
+
+    path = _task_file_path(task_id)
+    if not os.path.exists(path):
+        return None
+
+    with open(path, encoding="utf-8") as f:
+        task_data = json.load(f)
+    _tasks[task_id] = task_data
+    return task_data
+
+
+def _update_task(task_id: str, **fields) -> dict | None:
+    task_data = _load_task(task_id)
+    if not task_data:
+        return None
+
+    task_data.update(fields)
+    _save_task(task_data)
+    return task_data
 
 
 def safe_json_response(data, status=200):
@@ -98,7 +140,10 @@ def _write_bitable_updates_in_chunks(app_token: str, table_id: str, app_id: str,
 
 
 def _run_fill_approved_content(task_id: str) -> None:
-    task_data = _tasks[task_id]
+    task_data = _load_task(task_id)
+    if not task_data:
+        logger.error(f"Fill task not found: {task_id}")
+        return
     fill_job = task_data.setdefault("fill_job", {})
 
     try:
@@ -117,6 +162,7 @@ def _run_fill_approved_content(task_id: str) -> None:
             "message": "开始回填通过稿件",
             "error": "",
         })
+        _save_task(task_data)
 
         updates = []
         processed = 0
@@ -158,6 +204,7 @@ def _run_fill_approved_content(task_id: str) -> None:
             fill_job["updated"] = processed
             fill_job["skipped"] = skipped
             fill_job["message"] = f"正在回填 {idx}/{total_rows}"
+            _save_task(task_data)
 
         if not updates:
             fill_job.update({
@@ -166,6 +213,7 @@ def _run_fill_approved_content(task_id: str) -> None:
                 "skipped": skipped,
                 "message": "没有找到可回填的已审核通过稿件",
             })
+            _save_task(task_data)
             return
 
         success = _write_bitable_updates_in_chunks(
@@ -184,6 +232,7 @@ def _run_fill_approved_content(task_id: str) -> None:
             "skipped": skipped,
             "message": f"已回填 {processed} 条稿件内容",
         })
+        _save_task(task_data)
     except Exception as e:
         logger.error(f"Failed to fill approved content for task {task_id}: {e}")
         fill_job.update({
@@ -191,6 +240,7 @@ def _run_fill_approved_content(task_id: str) -> None:
             "error": str(e),
             "message": f"回填失败: {str(e)}",
         })
+        _save_task(task_data)
 
 
 @api_bp.route("/config", methods=["GET", "POST"])
@@ -312,7 +362,7 @@ def parse_url():
             "status": "ready",
             "created_at": datetime.now().isoformat()
         }
-        _tasks[task_id] = task_data
+        _save_task(task_data)
 
         response_data = {
             "task_id": task_id,
@@ -381,7 +431,7 @@ def upload_file():
             "status": "ready",
             "created_at": datetime.now().isoformat()
         }
-        _tasks[task_id] = task_data
+        _save_task(task_data)
 
         response_data = {
             "task_id": task_id,
@@ -484,15 +534,17 @@ def start_review(task_id):
     from core.review_engine import process_review_task
 
     try:
-        if task_id not in _tasks:
+        task_data = _load_task(task_id)
+        if not task_data:
             return safe_json_response({"error": "任务不存在"}, 404)
 
-        task_data = _tasks[task_id]
         if task_data["status"] != "ready":
             return safe_json_response({"error": "任务状态无效"}, 400)
 
         # 更新任务状态
         task_data["status"] = "processing"
+        task_data.pop("error", None)
+        _save_task(task_data)
 
         def generate_progress():
             try:
@@ -501,11 +553,13 @@ def start_review(task_id):
                     yield f"data: {json.dumps(progress_data, ensure_ascii=False)}\n\n"
 
                 task_data["status"] = "completed"
+                _save_task(task_data)
 
             except Exception as e:
                 logger.error(f"Review process failed for task {task_id}: {e}")
                 task_data["status"] = "failed"
                 task_data["error"] = str(e)
+                _save_task(task_data)
                 yield f"data: {json.dumps({'type': 'error', 'msg': str(e)}, ensure_ascii=False)}\n\n"
 
         return Response(generate_progress(), mimetype='text/event-stream')
@@ -520,10 +574,10 @@ def start_review(task_id):
 def fill_approved_content(task_id):
     """将已通过小题审核的稿件链接内容回填到表格列。"""
     try:
-        if task_id not in _tasks:
+        task_data = _load_task(task_id)
+        if not task_data:
             return safe_json_response({"error": "任务不存在"}, 404)
 
-        task_data = _tasks[task_id]
         if task_data.get("type") != "feishu_url":
             return safe_json_response({"error": "仅支持飞书表格任务"}, 400)
 
@@ -561,6 +615,7 @@ def fill_approved_content(task_id):
             "error": "",
             "created_at": datetime.now().isoformat(),
         }
+        _save_task(task_data)
         threading.Thread(target=_run_fill_approved_content, args=(task_id,), daemon=True).start()
 
         return safe_json_response({
@@ -580,10 +635,11 @@ def fill_approved_content(task_id):
 @login_required()
 def get_fill_approved_content_status(task_id):
     try:
-        if task_id not in _tasks:
+        task_data = _load_task(task_id)
+        if not task_data:
             return safe_json_response({"error": "任务不存在"}, 404)
 
-        fill_job = (_tasks[task_id].get("fill_job") or {}).copy()
+        fill_job = (task_data.get("fill_job") or {}).copy()
         if not fill_job:
             return safe_json_response({"error": "回填任务未启动"}, 404)
         fill_job["task_id"] = task_id
@@ -600,10 +656,10 @@ def get_fill_approved_content_status(task_id):
 def get_task_status(task_id):
     """获取任务状态"""
     try:
-        if task_id not in _tasks:
+        task_data = _load_task(task_id)
+        if not task_data:
             return safe_json_response({"error": "任务不存在"}, 404)
 
-        task_data = _tasks[task_id]
         status_data = {
             "task_id": task_id,
             "status": task_data["status"],
