@@ -5,6 +5,8 @@ import logging
 import os
 import re
 import time
+import base64
+import mimetypes
 from typing import Dict, List, Any, Generator, Optional
 
 import anthropic
@@ -252,6 +254,7 @@ def _process_row(client, model: str, row: Dict[str, Any], task_data: Dict[str, A
             project_config=project_config,
             client=client,
             model=model,
+            image_paths=image_paths,
         )
 
         audit_notes = _append_image_audit_notes(
@@ -696,6 +699,82 @@ def _split_benefit_requirements(text: str) -> List[str]:
     return items
 
 
+def _load_image_blocks_for_llm(image_paths: List[str], max_images: int = 4) -> List[Dict[str, Any]]:
+    blocks: List[Dict[str, Any]] = []
+    for image_path in image_paths[:max_images]:
+        try:
+            if not image_path or not os.path.exists(image_path):
+                continue
+            mime_type, _ = mimetypes.guess_type(image_path)
+            if mime_type not in {"image/png", "image/jpeg", "image/webp", "image/gif"}:
+                continue
+            with open(image_path, "rb") as f:
+                encoded = base64.b64encode(f.read()).decode("ascii")
+            blocks.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": mime_type,
+                    "data": encoded,
+                },
+            })
+        except Exception as e:
+            logger.warning(f"Failed to prepare image for LLM slogan recheck: {image_path}: {e}")
+    return blocks
+
+
+def _llm_recheck_slogan(client, model: str, content: str, slogan_word: str,
+                        image_paths: List[str]) -> Dict[str, Any]:
+    """规则和 OCR 都未命中时，使用 LLM 对文本/图片再确认一次口令词。"""
+    slogan_word = (slogan_word or "").strip()
+    if not client or not model or not slogan_word:
+        return {"matched": False, "analysis": ""}
+
+    prompt = f"""你是一个严格的内容审核员。请判断“要求口令词”是否真实出现在稿件正文或图片中。
+
+要求口令词：
+{slogan_word}
+
+补充上下文（正文 + OCR）：
+{content[:6000] if content else "（空）"}
+
+判断要求：
+1. 只判断这个口令词是否出现，不要审别的内容。
+2. 优先精确匹配；允许图片里出现轻微分隔符、空格、换行。
+3. 如果只是语义接近、不是同一个口令词，不算匹配。
+4. 如果无法确认，就返回 matched=false。
+
+请只返回 JSON：
+{{
+  "matched": true/false,
+  "analysis": "简短说明"
+}}"""
+
+    content_blocks: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
+    content_blocks.extend(_load_image_blocks_for_llm(image_paths))
+
+    try:
+        msg = client.messages.create(
+            model=model,
+            max_tokens=500,
+            messages=[{"role": "user", "content": content_blocks}],
+        )
+        result_text = msg.content[0].text.strip()
+        if result_text.startswith("```json"):
+            result_text = result_text.replace("```json", "").replace("```", "").strip()
+        elif result_text.startswith("```"):
+            result_text = result_text.replace("```", "").strip()
+
+        result = json.loads(result_text)
+        return {
+            "matched": bool(result.get("matched")),
+            "analysis": str(result.get("analysis") or "").strip(),
+        }
+    except Exception as e:
+        logger.warning(f"LLM slogan recheck failed: {e}")
+        return {"matched": False, "analysis": str(e)}
+
+
 def _llm_recheck_benefits(client, model: str, content: str, missing_benefits: List[str]) -> Dict[str, Any]:
     """仅在规则未匹配到利益点时，使用 LLM 做语义复核。"""
     if not client or not model or not content.strip() or not missing_benefits:
@@ -751,7 +830,8 @@ def _llm_recheck_benefits(client, model: str, content: str, missing_benefits: Li
 def _audit_row_against_project(content: str, slogan_word: str, project_name: str,
                                project_config: Dict[str, Any] = None,
                                client=None,
-                               model: str = "") -> tuple[bool, str, str]:
+                               model: str = "",
+                               image_paths: Optional[List[str]] = None) -> tuple[bool, str, str]:
     """按项目名称和 CSV 规则做确定性审核。"""
     violations = []
     missing_benefits = []
@@ -764,7 +844,19 @@ def _audit_row_against_project(content: str, slogan_word: str, project_name: str
 
     if not violations:
         if slogan_word and not _contains_required_text(content, slogan_word):
-            violations.append(f"口令词不一致，正文未包含“{slogan_word}”")
+            slogan_llm_result = _llm_recheck_slogan(
+                client,
+                model,
+                content,
+                slogan_word,
+                image_paths or [],
+            )
+            if slogan_llm_result.get("matched"):
+                notes_parts.append(f"LLM复核口令词通过: {slogan_word}")
+            else:
+                violations.append(f"口令词不一致，正文/图片未确认包含“{slogan_word}”")
+                if slogan_llm_result.get("analysis"):
+                    notes_parts.append(f"LLM口令词复核说明: {slogan_llm_result['analysis']}")
 
         for hashtag in _extract_hashtags(project_config.get("话题标签", "")):
             if not _contains_required_text(content, hashtag):
