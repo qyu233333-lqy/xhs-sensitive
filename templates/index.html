@@ -363,6 +363,7 @@ async function loadAuthState() {
 }
 
 function renderAuthState() {
+  const authCard = document.getElementById('authCard');
   const summary = document.getElementById('authSummary');
   const tip = document.getElementById('authTip');
   const loginBtn = document.getElementById('loginBtn');
@@ -379,6 +380,7 @@ function renderAuthState() {
   logoutBtn.classList.add('hidden');
 
   if (!authState || !authState.enabled) {
+    authCard.classList.add('hidden');
     summary.innerHTML = '<strong>登录模式：</strong>未启用钉钉登录，当前为本地管理模式。';
     settingsCard.classList.remove('hidden');
     profileHint.textContent = '当前未启用登录鉴权，默认使用本地配置的部门 profile。';
@@ -386,6 +388,8 @@ function renderAuthState() {
     quickFillBtn.disabled = false;
     return;
   }
+
+  authCard.classList.remove('hidden');
 
   const user = authState.user || {};
   if (authState.authenticated) {

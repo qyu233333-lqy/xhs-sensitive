@@ -24,7 +24,11 @@ def get_auth_config(config: Dict[str, Any] | None = None) -> Dict[str, Any]:
 
 
 def is_auth_enabled(config: Dict[str, Any] | None = None) -> bool:
-    return bool(get_auth_config(config).get("enabled"))
+    # DingTalk auth has been retired from the product flow.
+    # Keep the config structure for backward compatibility, but
+    # force the runtime behavior to local mode so existing saved
+    # auth settings cannot block parsing/review endpoints.
+    return False
 
 
 def is_auth_ready(config: Dict[str, Any] | None = None) -> bool:
@@ -215,10 +219,10 @@ def get_auth_status(config: Dict[str, Any] | None = None) -> Dict[str, Any]:
     auth_config = get_auth_config(cfg)
     mapping_count = len(load_user_mappings(cfg).get("users", [])) if os.path.exists(_mapping_file_path(cfg)) else 0
     return {
-        "enabled": bool(auth_config.get("enabled")),
+        "enabled": False,
         "ready": is_auth_ready(cfg),
         "authenticated": bool(current_user),
-        "login_url": "/api/auth/dingtalk/login" if auth_config.get("enabled") else "",
+        "login_url": "",
         "logout_url": "/api/auth/logout",
         "mapping_path": auth_config.get("user_mapping_path", "user_groups.json"),
         "mapping_count": mapping_count,
