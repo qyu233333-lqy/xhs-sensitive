@@ -1,0 +1,5 @@
+2026-04-27 18:26:31,664 - __main__ - INFO - Starting Content Review Web Application
+ * Serving Flask app 'app'
+ * Debug mode: off
+Address already in use
+Port 8000 is in use by another program. Either identify and stop that program, or start the server with a different port.
