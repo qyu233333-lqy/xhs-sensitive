@@ -22,7 +22,7 @@ from .feishu import (
     write_feishu_sheet,
 )
 from .file_utils import format_audit_status_display, save_results_to_excel, get_hyperlink_for_cell
-from .image_audit import filter_images_for_text_check, run_ocr_on_images
+from .image_audit import filter_images_for_text_check, run_ocr_on_images, select_images_for_ocr
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +203,11 @@ def _process_row(client, model: str, row: Dict[str, Any], task_data: Dict[str, A
         content_parts = []
         image_paths: List[str] = []
         image_fetch_errors: List[str] = []
+        logger.info(
+            "Review content resolution start: record_id=%s resolved_link_url=%s",
+            row.get("_record_id", ""),
+            resolved_link_url,
+        )
         if resolved_link_url:
             if any(domain in resolved_link_url for domain in ["feishu.cn", "larksuite.com"]):
                 snapshot = download_feishu_doc_snapshot(
@@ -221,6 +226,12 @@ def _process_row(client, model: str, row: Dict[str, Any], task_data: Dict[str, A
                 )
                 image_paths = image_bundle.get("image_paths") or []
                 image_fetch_errors = image_bundle.get("errors") or []
+                logger.info(
+                    "Fetched review assets: record_id=%s doc_images=%s image_errors=%s",
+                    row.get("_record_id", ""),
+                    len(image_paths),
+                    len(image_fetch_errors),
+                )
             else:
                 content_parts.append(resolved_link_url)
 
@@ -243,11 +254,31 @@ def _process_row(client, model: str, row: Dict[str, Any], task_data: Dict[str, A
 
         image_screen_result = filter_images_for_text_check(image_paths)
         likely_text_image_paths = image_screen_result.get("likely_text_paths") or []
+        skipped_image_paths = image_screen_result.get("skipped_paths") or []
         image_fetch_errors.extend(image_screen_result.get("errors") or [])
+        logger.info(
+            "Image text screening: record_id=%s total=%s likely_text=%s skipped=%s screen_errors=%s",
+            row.get("_record_id", ""),
+            len(image_paths),
+            len(likely_text_image_paths),
+            len(skipped_image_paths),
+            len(image_screen_result.get("errors") or []),
+        )
+
+        selected_ocr_image_paths = select_images_for_ocr(likely_text_image_paths)
 
         # 文字审核先独立完成；只对疑似含字图片做 OCR，没字图片直接跳过。
-        ocr_result = run_ocr_on_images(likely_text_image_paths)
+        ocr_result = run_ocr_on_images(selected_ocr_image_paths)
         image_text = str(ocr_result.get("merged_text") or "").strip()
+        logger.info(
+            "OCR finished: record_id=%s selected_images=%s merged_text_length=%s ocr_errors=%s available=%s skip_reason=%s",
+            row.get("_record_id", ""),
+            len(selected_ocr_image_paths),
+            len(image_text),
+            len(ocr_result.get("errors") or []),
+            ocr_result.get("available"),
+            ocr_result.get("skip_reason"),
+        )
         combined_content = content if not image_text else f"{content}\n\n[图片OCR]\n{image_text}"
 
         project_config = get_project_config_exact_for_review(project_name) if project_name else None
@@ -258,7 +289,7 @@ def _process_row(client, model: str, row: Dict[str, Any], task_data: Dict[str, A
             project_config=project_config,
             client=client,
             model=model,
-            image_paths=likely_text_image_paths,
+            image_paths=selected_ocr_image_paths,
         )
 
         audit_notes = _append_image_audit_notes(
@@ -267,8 +298,8 @@ def _process_row(client, model: str, row: Dict[str, Any], task_data: Dict[str, A
             image_text=image_text,
             image_fetch_errors=image_fetch_errors,
             ocr_result=ocr_result,
-            skipped_image_paths=image_screen_result.get("skipped_paths") or [],
-            checked_image_paths=likely_text_image_paths,
+            skipped_image_paths=skipped_image_paths,
+            checked_image_paths=selected_ocr_image_paths,
         )
 
         # 构建结果
@@ -291,6 +322,13 @@ def _process_row(client, model: str, row: Dict[str, Any], task_data: Dict[str, A
                 comment
             )
 
+        logger.info(
+            "Review result summary: record_id=%s passed=%s violations=%s notes=%s",
+            row.get("_record_id", ""),
+            overall_passed,
+            violations,
+            audit_notes,
+        )
         return result
 
     except Exception as e:
@@ -861,6 +899,11 @@ def _llm_recheck_slogan(client, model: str, content: str, slogan_word: str,
             messages=[{"role": "user", "content": content_blocks}],
         )
         result_text = _extract_message_text(msg)
+        logger.info(
+            "LLM slogan recheck raw text: slogan=%s response=%s",
+            slogan_word,
+            result_text[:500],
+        )
         try:
             result = _parse_llm_json_payload(result_text)
         except Exception:
@@ -911,6 +954,7 @@ def _llm_recheck_benefits(client, model: str, content: str, missing_benefits: Li
             messages=[{"role": "user", "content": prompt}],
         )
         result_text = _extract_message_text(msg)
+        logger.info("LLM benefit recheck raw text: response=%s", result_text[:500])
         try:
             result = _parse_llm_json_payload(result_text)
         except Exception:

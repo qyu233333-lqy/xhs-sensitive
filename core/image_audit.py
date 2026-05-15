@@ -19,6 +19,7 @@ DEFAULT_OCR_PYTHON = os.getenv(
     os.path.join(BASE_DIR, ".venv_paddleocr", "bin", "python"),
 )
 OCR_WORKER = os.path.join(BASE_DIR, "core", "ocr_worker.py")
+MAX_IMAGES_FOR_OCR = max(1, int(os.getenv("OCR_MAX_IMAGES", "1")))
 
 
 def filter_images_for_text_check(image_paths: List[str]) -> Dict[str, Any]:
@@ -73,6 +74,20 @@ def filter_images_for_text_check(image_paths: List[str]) -> Dict[str, Any]:
     }
 
 
+def select_images_for_ocr(image_paths: List[str]) -> List[str]:
+    """限制进入 OCR 的图片数量，优先保留靠前的疑似含字图片。"""
+    selected = [path for path in image_paths if path][:MAX_IMAGES_FOR_OCR]
+    logger.info(
+        "OCR image selection: total_candidates=%s selected=%s max_images=%s",
+        len(image_paths),
+        len(selected),
+        MAX_IMAGES_FOR_OCR,
+    )
+    if selected:
+        logger.info("OCR selected image paths: %s", selected)
+    return selected
+
+
 def _get_ocr_timeout_seconds() -> float:
     """读取 OCR 超时时间，默认走短超时，避免阻塞主审核流程。"""
     raw_timeout = os.getenv("OCR_TIMEOUT_SECONDS", "120")
@@ -86,6 +101,7 @@ def _get_ocr_timeout_seconds() -> float:
 def run_ocr_on_images(image_paths: List[str]) -> Dict[str, Any]:
     """Run PaddleOCR out-of-process so main text audit remains isolated."""
     unique_paths = [path for path in dict.fromkeys(image_paths) if path]
+    logger.info("OCR request received: image_count=%s", len(unique_paths))
     if not unique_paths:
         return {
             "texts": [],
@@ -132,6 +148,13 @@ def run_ocr_on_images(image_paths: List[str]) -> Dict[str, Any]:
     try:
         env = os.environ.copy()
         env.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+        logger.info(
+            "Launching OCR subprocess: python=%s worker=%s timeout=%ss images=%s",
+            DEFAULT_OCR_PYTHON,
+            OCR_WORKER,
+            timeout_seconds,
+            unique_paths,
+        )
         completed = subprocess.run(
             [DEFAULT_OCR_PYTHON, OCR_WORKER, *unique_paths],
             capture_output=True,
