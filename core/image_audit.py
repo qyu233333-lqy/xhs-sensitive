@@ -21,11 +21,11 @@ OCR_WORKER = os.path.join(BASE_DIR, "core", "ocr_worker.py")
 
 def _get_ocr_timeout_seconds() -> float:
     """读取 OCR 超时时间，默认走短超时，避免阻塞主审核流程。"""
-    raw_timeout = os.getenv("OCR_TIMEOUT_SECONDS", "20")
+    raw_timeout = os.getenv("OCR_TIMEOUT_SECONDS", "120")
     try:
         timeout_seconds = float(raw_timeout)
     except ValueError:
-        timeout_seconds = 20.0
+        timeout_seconds = 120.0
     return max(0.0, timeout_seconds)
 
 
