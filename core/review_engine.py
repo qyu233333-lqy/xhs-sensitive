@@ -784,6 +784,40 @@ def _extract_message_text(message: Any) -> str:
     return "\n".join([part for part in parts if part]).strip()
 
 
+def _extract_bool_field(text: str, field_name: str) -> Optional[bool]:
+    pattern = re.compile(rf'"?{re.escape(field_name)}"?\s*[:：=]\s*(true|false)', re.IGNORECASE)
+    match = pattern.search(text or "")
+    if match:
+        return match.group(1).lower() == "true"
+    return None
+
+
+def _extract_string_field(text: str, field_name: str) -> str:
+    patterns = [
+        re.compile(rf'"?{re.escape(field_name)}"?\s*[:：=]\s*"([^"]*)"', re.IGNORECASE),
+        re.compile(rf'"?{re.escape(field_name)}"?\s*[:：=]\s*([^\n\r,}}]+)', re.IGNORECASE),
+    ]
+    for pattern in patterns:
+        match = pattern.search(text or "")
+        if match:
+            return str(match.group(1)).strip()
+    return ""
+
+
+def _extract_list_field(text: str, field_name: str) -> List[str]:
+    pattern = re.compile(rf'"?{re.escape(field_name)}"?\s*[:：=]\s*\[(.*?)\]', re.IGNORECASE | re.DOTALL)
+    match = pattern.search(text or "")
+    if not match:
+        return []
+    raw = match.group(1)
+    items = []
+    for piece in raw.split(","):
+        cleaned = piece.strip().strip('"').strip("'").strip()
+        if cleaned:
+            items.append(cleaned)
+    return items
+
+
 def _llm_recheck_slogan(client, model: str, content: str, slogan_word: str,
                         image_paths: List[str]) -> Dict[str, Any]:
     """规则和 OCR 都未命中时，使用 LLM 对文本/图片再确认一次口令词。"""
@@ -821,7 +855,14 @@ def _llm_recheck_slogan(client, model: str, content: str, slogan_word: str,
             messages=[{"role": "user", "content": content_blocks}],
         )
         result_text = _extract_message_text(msg)
-        result = _parse_llm_json_payload(result_text)
+        try:
+            result = _parse_llm_json_payload(result_text)
+        except Exception:
+            extracted_matched = _extract_bool_field(result_text, "matched")
+            result = {
+                "matched": bool(extracted_matched) if extracted_matched is not None else False,
+                "analysis": _extract_string_field(result_text, "analysis") or result_text[:500],
+            }
         return {
             "matched": bool(result.get("matched")),
             "analysis": str(result.get("analysis") or "").strip(),
@@ -864,7 +905,15 @@ def _llm_recheck_benefits(client, model: str, content: str, missing_benefits: Li
             messages=[{"role": "user", "content": prompt}],
         )
         result_text = _extract_message_text(msg)
-        result = _parse_llm_json_payload(result_text)
+        try:
+            result = _parse_llm_json_payload(result_text)
+        except Exception:
+            extracted_compliant = _extract_bool_field(result_text, "compliant")
+            result = {
+                "compliant": bool(extracted_compliant) if extracted_compliant is not None else False,
+                "matched_benefits": _extract_list_field(result_text, "matched_benefits"),
+                "analysis": _extract_string_field(result_text, "analysis") or result_text[:500],
+            }
         matched = result.get("matched_benefits") or []
         if not isinstance(matched, list):
             matched = [str(matched)] if matched else []
