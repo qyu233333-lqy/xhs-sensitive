@@ -769,6 +769,21 @@ def _parse_llm_json_payload(result_text: str) -> Dict[str, Any]:
     raise ValueError(f"unable to parse JSON from LLM response: {text[:200]}")
 
 
+def _extract_message_text(message: Any) -> str:
+    """兼容 Anthropic 返回的 text/thinking 多种 block，只提取文本块。"""
+    parts: List[str] = []
+    for block in getattr(message, "content", []) or []:
+        text = getattr(block, "text", None)
+        if text:
+            parts.append(str(text).strip())
+            continue
+        if isinstance(block, dict):
+            block_text = block.get("text")
+            if block_text:
+                parts.append(str(block_text).strip())
+    return "\n".join([part for part in parts if part]).strip()
+
+
 def _llm_recheck_slogan(client, model: str, content: str, slogan_word: str,
                         image_paths: List[str]) -> Dict[str, Any]:
     """规则和 OCR 都未命中时，使用 LLM 对文本/图片再确认一次口令词。"""
@@ -805,7 +820,7 @@ def _llm_recheck_slogan(client, model: str, content: str, slogan_word: str,
             max_tokens=500,
             messages=[{"role": "user", "content": content_blocks}],
         )
-        result_text = msg.content[0].text.strip()
+        result_text = _extract_message_text(msg)
         result = _parse_llm_json_payload(result_text)
         return {
             "matched": bool(result.get("matched")),
@@ -848,7 +863,7 @@ def _llm_recheck_benefits(client, model: str, content: str, missing_benefits: Li
             max_tokens=800,
             messages=[{"role": "user", "content": prompt}],
         )
-        result_text = msg.content[0].text.strip()
+        result_text = _extract_message_text(msg)
         result = _parse_llm_json_payload(result_text)
         matched = result.get("matched_benefits") or []
         if not isinstance(matched, list):
