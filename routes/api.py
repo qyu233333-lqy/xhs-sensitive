@@ -9,6 +9,7 @@ import time
 import uuid
 from datetime import datetime
 from flask import Blueprint, request, jsonify, Response, redirect, session
+from typing import Dict, Any, Optional, List
 
 from core.auth import (
     build_callback_redirect,
@@ -60,7 +61,7 @@ def _task_file_path(task_id: str) -> str:
     return os.path.join(TASK_DIR, f"{task_id}.json")
 
 
-def _save_task(task_data: dict) -> None:
+def _save_task(task_data: Dict[str, Any]) -> None:
     task_id = str(task_data["task_id"])
     _tasks[task_id] = task_data
 
@@ -71,7 +72,7 @@ def _save_task(task_data: dict) -> None:
     os.replace(tmp_path, path)
 
 
-def _load_task(task_id: str) -> dict | None:
+def _load_task(task_id: str) -> Optional[Dict[str, Any]]:
     cached = _tasks.get(task_id)
     if cached:
         return cached
@@ -86,7 +87,7 @@ def _load_task(task_id: str) -> dict | None:
     return task_data
 
 
-def _update_task(task_id: str, **fields) -> dict | None:
+def _update_task(task_id: str, **fields) -> Optional[Dict[str, Any]]:
     task_data = _load_task(task_id)
     if not task_data:
         return None
@@ -126,7 +127,7 @@ def _is_approved_review_status(value: object) -> bool:
 
 
 def _write_bitable_updates_in_chunks(app_token: str, table_id: str, app_id: str, app_secret: str,
-                                     updates: list[dict], chunk_size: int = 100) -> bool:
+                                     updates: List[Dict[str, Any]], chunk_size: int = 100) -> bool:
     """分批写回，降低大表单次请求失败概率。"""
     if not updates:
         return True

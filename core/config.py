@@ -4,7 +4,7 @@ import json
 import os
 import logging
 from copy import deepcopy
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -173,7 +173,7 @@ def load_config() -> Dict[str, Any]:
     return config
 
 
-def get_key_profiles_metadata(config: Dict[str, Any]) -> list[Dict[str, Any]]:
+def get_key_profiles_metadata(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     """返回可给前端使用的 profile 元数据，不包含密钥。"""
     profiles = []
     for profile_id, profile in (config.get("key_profiles") or {}).items():
@@ -192,7 +192,7 @@ def get_key_profiles_metadata(config: Dict[str, Any]) -> list[Dict[str, Any]]:
     return profiles
 
 
-def resolve_ai_profile(config: Dict[str, Any], profile_id: str | None = None) -> Dict[str, Any]:
+def resolve_ai_profile(config: Dict[str, Any], profile_id: Optional[str] = None) -> Dict[str, Any]:
     """按 profile_id 解析审核使用的 AI 配置。"""
     profiles = config.get("key_profiles") or {}
     selected_id = profile_id or config.get("default_profile_id") or "ops1"

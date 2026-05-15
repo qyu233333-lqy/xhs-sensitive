@@ -5,7 +5,7 @@ import logging
 import os
 import secrets
 from functools import wraps
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from urllib.parse import urlencode
 
 import requests
@@ -18,12 +18,12 @@ logger = logging.getLogger(__name__)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def get_auth_config(config: Dict[str, Any] | None = None) -> Dict[str, Any]:
+def get_auth_config(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     cfg = config or load_config()
     return cfg.get("auth") or {}
 
 
-def is_auth_enabled(config: Dict[str, Any] | None = None) -> bool:
+def is_auth_enabled(config: Optional[Dict[str, Any]] = None) -> bool:
     # DingTalk auth has been retired from the product flow.
     # Keep the config structure for backward compatibility, but
     # force the runtime behavior to local mode so existing saved
@@ -31,7 +31,7 @@ def is_auth_enabled(config: Dict[str, Any] | None = None) -> bool:
     return False
 
 
-def is_auth_ready(config: Dict[str, Any] | None = None) -> bool:
+def is_auth_ready(config: Optional[Dict[str, Any]] = None) -> bool:
     auth_config = get_auth_config(config)
     return bool(
         auth_config.get("enabled")
@@ -41,13 +41,13 @@ def is_auth_ready(config: Dict[str, Any] | None = None) -> bool:
     )
 
 
-def _mapping_file_path(config: Dict[str, Any] | None = None) -> str:
+def _mapping_file_path(config: Optional[Dict[str, Any]] = None) -> str:
     auth_config = get_auth_config(config)
     raw_path = auth_config.get("user_mapping_path") or "user_groups.json"
     return raw_path if os.path.isabs(raw_path) else os.path.join(BASE_DIR, raw_path)
 
 
-def load_user_mappings(config: Dict[str, Any] | None = None) -> Dict[str, Any]:
+def load_user_mappings(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     path = _mapping_file_path(config)
     if not os.path.exists(path):
         return {"users": []}
@@ -102,7 +102,7 @@ def _entry_matches_user(entry: Dict[str, Any], normalized_user: Dict[str, Any]) 
     return False
 
 
-def resolve_user_access(user_info: Dict[str, Any], config: Dict[str, Any] | None = None) -> Dict[str, Any]:
+def resolve_user_access(user_info: Dict[str, Any], config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     normalized_user = _normalize_user_info(user_info)
     mappings = load_user_mappings(config).get("users", [])
 
@@ -126,12 +126,12 @@ def resolve_user_access(user_info: Dict[str, Any], config: Dict[str, Any] | None
     raise PermissionError("当前钉钉账号未分配到可用部门，请联系管理员维护 user_groups.json")
 
 
-def get_current_user() -> Dict[str, Any] | None:
+def get_current_user() -> Optional[Dict[str, Any]]:
     user = session.get("auth_user")
     return user if isinstance(user, dict) else None
 
 
-def build_dingtalk_login_url(config: Dict[str, Any] | None = None) -> str:
+def build_dingtalk_login_url(config: Optional[Dict[str, Any]] = None) -> str:
     cfg = config or load_config()
     auth_config = get_auth_config(cfg)
     state = secrets.token_urlsafe(24)
@@ -156,7 +156,7 @@ def _request_json(method: str, url: str, **kwargs) -> Dict[str, Any]:
     return data
 
 
-def exchange_code_for_user_token(code: str, config: Dict[str, Any] | None = None) -> str:
+def exchange_code_for_user_token(code: str, config: Optional[Dict[str, Any]] = None) -> str:
     auth_config = get_auth_config(config)
     payload = {
         "clientId": auth_config.get("dingtalk_app_key", ""),
@@ -171,7 +171,7 @@ def exchange_code_for_user_token(code: str, config: Dict[str, Any] | None = None
     return access_token
 
 
-def fetch_dingtalk_user_info(user_access_token: str, config: Dict[str, Any] | None = None) -> Dict[str, Any]:
+def fetch_dingtalk_user_info(user_access_token: str, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     auth_config = get_auth_config(config)
     headers = {
         "x-acs-dingtalk-access-token": user_access_token,
@@ -203,7 +203,7 @@ def login_required(admin: bool = False):
     return decorator
 
 
-def effective_profile_id(config: Dict[str, Any] | None = None, requested_profile_id: str | None = None) -> str:
+def effective_profile_id(config: Optional[Dict[str, Any]] = None, requested_profile_id: Optional[str] = None) -> str:
     cfg = config or load_config()
     if is_auth_enabled(cfg):
         current_user = get_current_user()
@@ -213,7 +213,7 @@ def effective_profile_id(config: Dict[str, Any] | None = None, requested_profile
     return requested_profile_id or cfg.get("default_profile_id") or "ops1"
 
 
-def get_auth_status(config: Dict[str, Any] | None = None) -> Dict[str, Any]:
+def get_auth_status(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     cfg = config or load_config()
     current_user = get_current_user()
     auth_config = get_auth_config(cfg)
@@ -245,7 +245,7 @@ def clear_authenticated_user() -> None:
     session.pop("dingtalk_oauth_state", None)
 
 
-def build_callback_redirect(error: str | None = None) -> str:
+def build_callback_redirect(error: Optional[str] = None) -> str:
     base = request.host_url.rstrip("/") + "/"
     if not error:
         return base

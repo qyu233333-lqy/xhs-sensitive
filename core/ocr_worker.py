@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from typing import Any
+from typing import Any, List
 
 
 def _build_ocr():
@@ -27,7 +27,7 @@ def _build_ocr():
 
 
 def _extract_text(result: Any) -> str:
-    texts: list[str] = []
+    texts: List[str] = []
 
     if hasattr(result, "res") and isinstance(result.res, dict):
         for item in result.res.get("rec_texts") or []:

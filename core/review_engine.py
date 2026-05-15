@@ -831,7 +831,7 @@ def _audit_row_against_project(content: str, slogan_word: str, project_name: str
                                project_config: Dict[str, Any] = None,
                                client=None,
                                model: str = "",
-                               image_paths: Optional[List[str]] = None) -> tuple[bool, str, str]:
+                               image_paths: Optional[List[str]] = None) -> tuple:
     """按项目名称和 CSV 规则做确定性审核。"""
     violations = []
     missing_benefits = []
