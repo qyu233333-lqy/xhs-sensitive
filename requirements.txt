@@ -7,6 +7,9 @@ anthropic>=0.97.0
 # PDF processing
 PyMuPDF>=1.25.5
 
+# Image utilities used by lightweight text-presence screening
+Pillow>=11.3.0
+
 # Excel file processing
 openpyxl>=3.1.5
 
