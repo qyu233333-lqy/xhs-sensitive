@@ -9,6 +9,8 @@ import subprocess
 import sys
 from typing import Any, Dict, List
 
+from PIL import Image, ImageFilter, ImageStat
+
 logger = logging.getLogger(__name__)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -17,6 +19,58 @@ DEFAULT_OCR_PYTHON = os.getenv(
     os.path.join(BASE_DIR, ".venv_paddleocr", "bin", "python"),
 )
 OCR_WORKER = os.path.join(BASE_DIR, "core", "ocr_worker.py")
+
+
+def filter_images_for_text_check(image_paths: List[str]) -> Dict[str, Any]:
+    """快速筛掉明显无字的图片，降低 OCR/LLM 负担。
+
+    这是保守筛选：只跳过“极大概率没字”的图；拿不准就保留。
+    """
+    unique_paths = [path for path in dict.fromkeys(image_paths) if path]
+    likely_text_paths: List[str] = []
+    skipped_paths: List[str] = []
+    errors: List[str] = []
+
+    for image_path in unique_paths:
+        try:
+            with Image.open(image_path) as img:
+                img = img.convert("L")
+                width, height = img.size
+                if width <= 0 or height <= 0:
+                    skipped_paths.append(image_path)
+                    continue
+
+                # 大图缩小后做启发式判断，避免耗时过高。
+                thumb = img.copy()
+                thumb.thumbnail((640, 640))
+
+                edges = thumb.filter(ImageFilter.FIND_EDGES)
+                edge_mean = float(ImageStat.Stat(edges).mean[0])
+
+                dark_pixels = 0
+                total_pixels = thumb.width * thumb.height
+                pixels = thumb.load()
+                for y in range(thumb.height):
+                    for x in range(thumb.width):
+                        if pixels[x, y] < 170:
+                            dark_pixels += 1
+                dark_ratio = dark_pixels / max(total_pixels, 1)
+
+                # 经验阈值：非常空、几乎没边缘、几乎没深色像素的图片，视为无字。
+                if edge_mean < 6.0 and dark_ratio < 0.008:
+                    skipped_paths.append(image_path)
+                else:
+                    likely_text_paths.append(image_path)
+        except Exception as exc:
+            # 拿不准的图片不跳过，保守起见继续走 OCR。
+            likely_text_paths.append(image_path)
+            errors.append(f"{os.path.basename(image_path) or image_path}: {exc}")
+
+    return {
+        "likely_text_paths": likely_text_paths,
+        "skipped_paths": skipped_paths,
+        "errors": errors,
+    }
 
 
 def _get_ocr_timeout_seconds() -> float:

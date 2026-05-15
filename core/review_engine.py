@@ -22,7 +22,7 @@ from .feishu import (
     write_feishu_sheet,
 )
 from .file_utils import format_audit_status_display, save_results_to_excel, get_hyperlink_for_cell
-from .image_audit import run_ocr_on_images
+from .image_audit import filter_images_for_text_check, run_ocr_on_images
 
 logger = logging.getLogger(__name__)
 
@@ -241,8 +241,12 @@ def _process_row(client, model: str, row: Dict[str, Any], task_data: Dict[str, A
         if not content.strip():
             return _create_empty_content_result(row)
 
-        # 文字审核先独立完成，图片 OCR 只作为补充信息，失败则直接跳过。
-        ocr_result = run_ocr_on_images(image_paths)
+        image_screen_result = filter_images_for_text_check(image_paths)
+        likely_text_image_paths = image_screen_result.get("likely_text_paths") or []
+        image_fetch_errors.extend(image_screen_result.get("errors") or [])
+
+        # 文字审核先独立完成；只对疑似含字图片做 OCR，没字图片直接跳过。
+        ocr_result = run_ocr_on_images(likely_text_image_paths)
         image_text = str(ocr_result.get("merged_text") or "").strip()
         combined_content = content if not image_text else f"{content}\n\n[图片OCR]\n{image_text}"
 
@@ -254,7 +258,7 @@ def _process_row(client, model: str, row: Dict[str, Any], task_data: Dict[str, A
             project_config=project_config,
             client=client,
             model=model,
-            image_paths=image_paths,
+            image_paths=likely_text_image_paths,
         )
 
         audit_notes = _append_image_audit_notes(
@@ -263,6 +267,8 @@ def _process_row(client, model: str, row: Dict[str, Any], task_data: Dict[str, A
             image_text=image_text,
             image_fetch_errors=image_fetch_errors,
             ocr_result=ocr_result,
+            skipped_image_paths=image_screen_result.get("skipped_paths") or [],
+            checked_image_paths=likely_text_image_paths,
         )
 
         # 构建结果
@@ -994,14 +1000,22 @@ def _audit_row_against_project(content: str, slogan_word: str, project_name: str
 
 
 def _append_image_audit_notes(base_notes: str, image_paths: List[str], image_text: str,
-                              image_fetch_errors: List[str], ocr_result: Dict[str, Any]) -> str:
+                              image_fetch_errors: List[str], ocr_result: Dict[str, Any],
+                              skipped_image_paths: Optional[List[str]] = None,
+                              checked_image_paths: Optional[List[str]] = None) -> str:
     notes = [base_notes] if base_notes else []
     ocr_errors = ocr_result.get("errors") or []
     ocr_skip_reason = str(ocr_result.get("skip_reason") or "").strip()
     ocr_available = bool(ocr_result.get("available", True))
+    skipped_image_paths = skipped_image_paths or []
+    checked_image_paths = checked_image_paths or image_paths
 
     if image_paths:
         notes.append(f"图片审核: 共提取 {len(image_paths)} 张图片")
+    if skipped_image_paths:
+        notes.append(f"图片审核: 已快速跳过 {len(skipped_image_paths)} 张疑似无字图片")
+    if checked_image_paths:
+        notes.append(f"图片审核: 对 {len(checked_image_paths)} 张疑似含字图片执行文字检查")
     if image_text:
         notes.append("图片审核: 已识别图片文字并纳入口令词/利益点/话题标签校验")
     elif image_paths and ocr_skip_reason:
