@@ -723,6 +723,52 @@ def _load_image_blocks_for_llm(image_paths: List[str], max_images: int = 4) -> L
     return blocks
 
 
+def _parse_llm_json_payload(result_text: str) -> Dict[str, Any]:
+    """尽量从 LLM 返回文本中提取首个 JSON object。"""
+    text = (result_text or "").strip()
+    if not text:
+        raise ValueError("empty LLM response")
+
+    if text.startswith("```json"):
+        text = text.replace("```json", "", 1).replace("```", "").strip()
+    elif text.startswith("```"):
+        text = text.replace("```", "").strip()
+
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+
+    start = text.find("{")
+    while start != -1:
+        depth = 0
+        in_string = False
+        escape = False
+        for idx in range(start, len(text)):
+            ch = text[idx]
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+
+            if ch == '"':
+                in_string = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start:idx + 1]
+                    return json.loads(candidate)
+        start = text.find("{", start + 1)
+
+    raise ValueError(f"unable to parse JSON from LLM response: {text[:200]}")
+
+
 def _llm_recheck_slogan(client, model: str, content: str, slogan_word: str,
                         image_paths: List[str]) -> Dict[str, Any]:
     """规则和 OCR 都未命中时，使用 LLM 对文本/图片再确认一次口令词。"""
@@ -760,12 +806,7 @@ def _llm_recheck_slogan(client, model: str, content: str, slogan_word: str,
             messages=[{"role": "user", "content": content_blocks}],
         )
         result_text = msg.content[0].text.strip()
-        if result_text.startswith("```json"):
-            result_text = result_text.replace("```json", "").replace("```", "").strip()
-        elif result_text.startswith("```"):
-            result_text = result_text.replace("```", "").strip()
-
-        result = json.loads(result_text)
+        result = _parse_llm_json_payload(result_text)
         return {
             "matched": bool(result.get("matched")),
             "analysis": str(result.get("analysis") or "").strip(),
@@ -808,12 +849,7 @@ def _llm_recheck_benefits(client, model: str, content: str, missing_benefits: Li
             messages=[{"role": "user", "content": prompt}],
         )
         result_text = msg.content[0].text.strip()
-        if result_text.startswith("```json"):
-            result_text = result_text.replace("```json", "").replace("```", "").strip()
-        elif result_text.startswith("```"):
-            result_text = result_text.replace("```", "").strip()
-
-        result = json.loads(result_text)
+        result = _parse_llm_json_payload(result_text)
         matched = result.get("matched_benefits") or []
         if not isinstance(matched, list):
             matched = [str(matched)] if matched else []
