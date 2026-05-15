@@ -13,12 +13,9 @@ def _build_ocr():
     from paddleocr import PaddleOCR
 
     os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
-    base_dir = os.path.expanduser("~/.paddlex/official_models")
     return PaddleOCR(
         text_detection_model_name="PP-OCRv5_server_det",
-        text_detection_model_dir=os.path.join(base_dir, "PP-OCRv5_server_det"),
         text_recognition_model_name="PP-OCRv5_server_rec",
-        text_recognition_model_dir=os.path.join(base_dir, "PP-OCRv5_server_rec"),
         use_doc_orientation_classify=False,
         use_doc_unwarping=False,
         use_textline_orientation=False,

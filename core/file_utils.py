@@ -10,6 +10,7 @@ from typing import Dict, List, Any, Optional
 
 import fitz
 import openpyxl
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 
 logger = logging.getLogger(__name__)
 
@@ -273,11 +274,20 @@ def _normalize_excel_cell_value(value: Any) -> Any:
     if value is None:
         return ""
     if isinstance(value, dict):
-        return str(value.get("link") or value.get("url") or value.get("text") or json.dumps(value, ensure_ascii=False))
-    if isinstance(value, list):
+        value = str(value.get("link") or value.get("url") or value.get("text") or json.dumps(value, ensure_ascii=False))
+    elif isinstance(value, list):
         parts = [_normalize_excel_cell_value(item) for item in value]
-        return "; ".join([str(part) for part in parts if str(part).strip()])
-    return value
+        value = "; ".join([str(part) for part in parts if str(part).strip()])
+
+    if not isinstance(value, str):
+        return value
+
+    # openpyxl rejects ASCII control chars except tab/newline/carriage return.
+    cleaned = ILLEGAL_CHARACTERS_RE.sub("", value)
+    # Avoid extremely long stack traces bloating cells and breaking readability.
+    if len(cleaned) > 32000:
+        cleaned = cleaned[:32000] + "...(truncated)"
+    return cleaned
 
 
 def create_backup_filename(original_filename: str, timestamp_suffix: str = None) -> str:
