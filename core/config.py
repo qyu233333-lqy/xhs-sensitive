@@ -17,15 +17,15 @@ def _default_key_profiles() -> Dict[str, Any]:
         "ops1": {
             "label": "运营一部",
             "api_key": "",
-            "base_url": "",
-            "model": "claude-opus-4-6",
+            "base_url": "https://4sapi.com/v1",
+            "model": "claude-sonnet-4-20250514",
             "enabled": True,
         },
         "ops3": {
             "label": "运营三部",
             "api_key": "",
-            "base_url": "",
-            "model": "claude-opus-4-6",
+            "base_url": "https://4sapi.com/v1",
+            "model": "claude-sonnet-4-20250514",
             "enabled": True,
         }
     }
