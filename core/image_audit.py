@@ -19,7 +19,6 @@ DEFAULT_OCR_PYTHON = os.getenv(
     os.path.join(BASE_DIR, ".venv_paddleocr", "bin", "python"),
 )
 OCR_WORKER = os.path.join(BASE_DIR, "core", "ocr_worker.py")
-MAX_IMAGES_FOR_OCR = max(1, int(os.getenv("OCR_MAX_IMAGES", "1")))
 
 
 def filter_images_for_text_check(image_paths: List[str]) -> Dict[str, Any]:
@@ -75,16 +74,15 @@ def filter_images_for_text_check(image_paths: List[str]) -> Dict[str, Any]:
 
 
 def select_images_for_ocr(image_paths: List[str]) -> List[str]:
-    """限制进入 OCR 的图片数量，优先保留靠前的疑似含字图片。"""
-    selected = [path for path in image_paths if path][:MAX_IMAGES_FOR_OCR]
+    """返回全部疑似含字图片，供后续 LLM 图片兜底使用。"""
+    selected = [path for path in image_paths if path]
     logger.info(
-        "OCR image selection: total_candidates=%s selected=%s max_images=%s",
+        "Image selection for downstream checks: total_candidates=%s selected=%s",
         len(image_paths),
         len(selected),
-        MAX_IMAGES_FOR_OCR,
     )
     if selected:
-        logger.info("OCR selected image paths: %s", selected)
+        logger.info("Selected image paths for downstream checks: %s", selected)
     return selected
 
 
