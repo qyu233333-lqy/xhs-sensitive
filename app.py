@@ -23,19 +23,39 @@ os.makedirs(RESULT_DIR, exist_ok=True)
 def setup_logging():
     """配置应用日志"""
     log_level = os.getenv("LOG_LEVEL", "INFO").upper()
-    logging.basicConfig(
-        level=getattr(logging, log_level),
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler(os.path.join(BASE_DIR, 'app.log'))
-        ]
+    root_logger = logging.getLogger()
+    root_logger.setLevel(getattr(logging, log_level))
+
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
+
+    stream_handler_exists = any(
+        isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler)
+        for handler in root_logger.handlers
+    )
+    file_handler_exists = any(
+        isinstance(handler, logging.FileHandler)
+        and getattr(handler, "baseFilename", "") == os.path.join(BASE_DIR, 'app.log')
+        for handler in root_logger.handlers
+    )
+
+    if not stream_handler_exists:
+        stream_handler = logging.StreamHandler()
+        stream_handler.setFormatter(formatter)
+        root_logger.addHandler(stream_handler)
+
+    if not file_handler_exists:
+        file_handler = logging.FileHandler(os.path.join(BASE_DIR, 'app.log'))
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
+
     return logging.getLogger(__name__)
 
 
 def create_app():
     """应用工厂函数"""
+    setup_logging()
     app = Flask(__name__)
     config = load_config()
     app.secret_key = (
