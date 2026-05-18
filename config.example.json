@@ -1,8 +1,8 @@
 {
   "session_secret": "change-this-session-secret",
   "api_key": "",
-  "base_url": "https://4sapi.com/v1",
-  "model": "claude-sonnet-4-20250514",
+  "base_url": "https://4sapi.com",
+  "model": "claude-sonnet-4-6",
   "feishu_app_id": "cli_your-feishu-app-id-here",
   "feishu_app_secret": "your-feishu-app-secret-here",
   "default_profile_id": "ops1",
@@ -10,15 +10,15 @@
     "ops1": {
       "label": "运营一部",
       "api_key": "",
-      "base_url": "https://4sapi.com/v1",
-      "model": "claude-sonnet-4-20250514",
+      "base_url": "https://4sapi.com",
+      "model": "claude-sonnet-4-6",
       "enabled": true
     },
     "ops3": {
       "label": "运营三部",
       "api_key": "",
-      "base_url": "https://4sapi.com/v1",
-      "model": "claude-sonnet-4-20250514",
+      "base_url": "https://4sapi.com",
+      "model": "claude-sonnet-4-6",
       "enabled": true
     }
   },
