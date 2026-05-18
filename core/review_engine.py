@@ -740,9 +740,16 @@ def _split_benefit_requirements(text: str) -> List[str]:
     return items
 
 
-def _load_image_blocks_for_llm(image_paths: List[str], max_images: int = 4) -> List[Dict[str, Any]]:
+def _load_image_blocks_for_llm(image_paths: List[str], max_images: Optional[int] = None) -> List[Dict[str, Any]]:
     blocks: List[Dict[str, Any]] = []
-    for image_path in image_paths[:max_images]:
+    selected_paths = image_paths if max_images is None else image_paths[:max_images]
+    logger.info(
+        "LLM image payload selection: total_candidates=%s actual_sent=%s image_paths=%s",
+        len(image_paths),
+        len(selected_paths),
+        selected_paths,
+    )
+    for image_path in selected_paths:
         try:
             if not image_path or not os.path.exists(image_path):
                 continue
