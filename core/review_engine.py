@@ -873,13 +873,10 @@ def _llm_recheck_slogan(client, model: str, content: str, slogan_word: str,
     if not client or not model or not slogan_word:
         return {"matched": False, "analysis": ""}
 
-    prompt = f"""你是一个面向业务验收的内容审核员。请判断“要求口令词”是否真实出现在稿件正文或图片中。
+    prompt = f"""你是一个面向业务验收的内容审核员。请判断“要求口令词”是否真实出现在图片中。
 
 要求口令词：
 {slogan_word}
-
-补充上下文（正文 + OCR）：
-{content[:6000] if content else "（空）"}
 
 判断要求：
 1. 只判断这个口令词是否出现，不要审别的内容。
@@ -896,7 +893,8 @@ def _llm_recheck_slogan(client, model: str, content: str, slogan_word: str,
    - 字间距/换行/轻微断开
 4. 优先根据图片中的可见文字判断，不要因为正文里出现相似但不同的词，就否定图片里的命中。
 5. 只有在你明确判断“图片和正文里都不是这个词”，才返回 matched=false。
-6. 如果图片里出现的就是目标口令词，哪怕其他正文里有别的近似词，也仍然返回 matched=true。
+6. 如果图片里出现的就是目标口令词，哪怕稿件正文里有别的近似词，也仍然返回 matched=true。
+7. 不要参考稿件正文内容做判断，只根据当前这张图片中的可见文字判断。
 
 请只返回 JSON：
 {{
