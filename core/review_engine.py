@@ -6,8 +6,11 @@ import os
 import re
 import time
 import base64
+import io
 import mimetypes
 from typing import Dict, List, Any, Generator, Optional
+
+from PIL import Image
 
 import anthropic
 
@@ -753,16 +756,35 @@ def _load_image_blocks_for_llm(image_paths: List[str], max_images: Optional[int]
         try:
             if not image_path or not os.path.exists(image_path):
                 continue
-            mime_type, _ = mimetypes.guess_type(image_path)
-            if mime_type not in {"image/png", "image/jpeg", "image/webp", "image/gif"}:
-                continue
-            with open(image_path, "rb") as f:
-                encoded = base64.b64encode(f.read()).decode("ascii")
+            with Image.open(image_path) as img:
+                original_width, original_height = img.size
+                original_size = os.path.getsize(image_path)
+
+                processed = img.convert("RGB")
+                processed.thumbnail((1280, 1280))
+                compressed_width, compressed_height = processed.size
+
+                buffer = io.BytesIO()
+                processed.save(buffer, format="JPEG", quality=75, optimize=True)
+                payload_bytes = buffer.getvalue()
+                compressed_size = len(payload_bytes)
+                encoded = base64.b64encode(payload_bytes).decode("ascii")
+
+            logger.info(
+                "Prepared image for LLM: path=%s original=%sx%s/%sB compressed=%sx%s/%sB",
+                image_path,
+                original_width,
+                original_height,
+                original_size,
+                compressed_width,
+                compressed_height,
+                compressed_size,
+            )
             blocks.append({
                 "type": "image",
                 "source": {
                     "type": "base64",
-                    "media_type": mime_type,
+                    "media_type": "image/jpeg",
                     "data": encoded,
                 },
             })
