@@ -267,16 +267,13 @@ def _process_row(client, model: str, row: Dict[str, Any], task_data: Dict[str, A
 
         selected_ocr_image_paths = select_images_for_ocr(likely_text_image_paths)
 
-        # 文字审核先独立完成；只对疑似含字图片做 OCR，没字图片直接跳过。
-        ocr_result = run_ocr_on_images(selected_ocr_image_paths)
-        image_text = str(ocr_result.get("merged_text") or "").strip()
+        # 默认关闭 OCR 主链路，直接使用纯 LLM 图片口令词兜底。
+        ocr_result = run_ocr_on_images([])
+        image_text = ""
         logger.info(
-            "OCR finished: record_id=%s selected_images=%s merged_text_length=%s ocr_errors=%s available=%s skip_reason=%s",
+            "OCR bypassed: record_id=%s selected_images_for_llm=%s skip_reason=%s",
             row.get("_record_id", ""),
             len(selected_ocr_image_paths),
-            len(image_text),
-            len(ocr_result.get("errors") or []),
-            ocr_result.get("available"),
             ocr_result.get("skip_reason"),
         )
         combined_content = content if not image_text else f"{content}\n\n[图片OCR]\n{image_text}"
