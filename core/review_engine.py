@@ -904,16 +904,7 @@ def _llm_recheck_slogan(client, model: str, content: str, slogan_word: str,
   "analysis": "简短说明"
 }}"""
 
-    content_blocks: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
-    content_blocks.extend(_load_image_blocks_for_llm(image_paths))
-
-    try:
-        msg = client.messages.create(
-            model=model,
-            max_tokens=500,
-            messages=[{"role": "user", "content": content_blocks}],
-        )
-        result_text = _extract_message_text(msg)
+    def _parse_result(result_text: str) -> Dict[str, Any]:
         logger.info(
             "LLM slogan recheck raw text: slogan=%s response=%s",
             slogan_word,
@@ -931,6 +922,45 @@ def _llm_recheck_slogan(client, model: str, content: str, slogan_word: str,
             "matched": bool(result.get("matched")),
             "analysis": str(result.get("analysis") or "").strip(),
         }
+
+    try:
+        if not image_paths:
+            msg = client.messages.create(
+                model=model,
+                max_tokens=500,
+                messages=[{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+            )
+            return _parse_result(_extract_message_text(msg))
+
+        last_analysis = ""
+        for idx, image_path in enumerate(image_paths, start=1):
+            logger.info(
+                "LLM slogan recheck image-by-image: slogan=%s image_index=%s/%s image_path=%s",
+                slogan_word,
+                idx,
+                len(image_paths),
+                image_path,
+            )
+            content_blocks: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
+            content_blocks.extend(_load_image_blocks_for_llm([image_path]))
+            msg = client.messages.create(
+                model=model,
+                max_tokens=500,
+                messages=[{"role": "user", "content": content_blocks}],
+            )
+            parsed = _parse_result(_extract_message_text(msg))
+            logger.info(
+                "LLM slogan per-image result: slogan=%s image_index=%s matched=%s analysis=%s",
+                slogan_word,
+                idx,
+                parsed.get("matched"),
+                parsed.get("analysis"),
+            )
+            if parsed.get("matched"):
+                return parsed
+            last_analysis = parsed.get("analysis") or last_analysis
+
+        return {"matched": False, "analysis": last_analysis}
     except Exception as e:
         logger.warning(f"LLM slogan recheck failed: {e}")
         return {"matched": False, "analysis": str(e)}
