@@ -83,6 +83,19 @@ def load_config() -> Dict[str, Any]:
         "default_profile_id": "ops1",
         "key_profiles": _default_key_profiles(),
         "auth": _default_auth_config(),
+        "ocr_provider": "",
+        "volcengine": {
+            "access_key": "",
+            "secret_key": "",
+            "region": "cn-north-1",
+            "service": "cv",
+            "host": "visual.volcengineapi.com",
+            "ocr_action": "MultiLanguageOCR",
+            "ocr_version": "2022-08-31",
+            "mode": "text_block",
+            "filter_thresh": "80",
+            "approximate_pixel": "0",
+        },
         "project_config_path": "ref.csv",
         "enable_project_audit": True,
         "audit_modes": {
@@ -112,6 +125,8 @@ def load_config() -> Dict[str, Any]:
                             config[key][profile_id][sub_key] = sub_default
         elif key == "auth" and isinstance(config[key], dict):
             _apply_nested_defaults(config[key], default_value)
+        elif key == "volcengine" and isinstance(config[key], dict):
+            _apply_nested_defaults(config[key], default_value)
         elif key == "audit_modes" and isinstance(config[key], dict):
             # Merge audit_modes defaults
             for sub_key, sub_default in default_value.items():
@@ -130,6 +145,7 @@ def load_config() -> Dict[str, Any]:
         "CLAUDE_MODEL": "model",
         "FEISHU_APP_ID": "feishu_app_id",
         "FEISHU_APP_SECRET": "feishu_app_secret",
+        "OCR_PROVIDER": "ocr_provider",
         "PROJECT_CONFIG_PATH": "project_config_path",
         "ENABLE_PROJECT_AUDIT": "enable_project_audit",
         "SESSION_SECRET": "session_secret",
@@ -161,6 +177,20 @@ def load_config() -> Dict[str, Any]:
             continue
         auth_config[config_key] = env_value.lower() in ("true", "1", "yes", "on") if value_type == "bool" else env_value
     config["auth"] = auth_config
+
+    volcengine_env_mappings = {
+        "VOLCENGINE_ACCESS_KEY": "access_key",
+        "VOLCENGINE_SECRET_KEY": "secret_key",
+        "VOLCENGINE_REGION": "region",
+        "VOLCENGINE_SERVICE": "service",
+        "VOLCENGINE_VISUAL_HOST": "host",
+    }
+    volcengine_config = config.get("volcengine") or {}
+    for env_var, config_key in volcengine_env_mappings.items():
+        env_value = os.getenv(env_var)
+        if env_value:
+            volcengine_config[config_key] = env_value
+    config["volcengine"] = volcengine_config
 
     for profile_id, profile in (config.get("key_profiles") or {}).items():
         if not isinstance(profile, dict):

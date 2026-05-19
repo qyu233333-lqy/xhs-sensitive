@@ -5,6 +5,19 @@
   "model": "claude-sonnet-4-6",
   "feishu_app_id": "cli_your-feishu-app-id-here",
   "feishu_app_secret": "your-feishu-app-secret-here",
+  "ocr_provider": "volcengine",
+  "volcengine": {
+    "access_key": "your-volcengine-access-key",
+    "secret_key": "your-volcengine-secret-key",
+    "region": "cn-north-1",
+    "service": "cv",
+    "host": "visual.volcengineapi.com",
+    "ocr_action": "MultiLanguageOCR",
+    "ocr_version": "2022-08-31",
+    "mode": "text_block",
+    "filter_thresh": "80",
+    "approximate_pixel": "0"
+  },
   "default_profile_id": "ops1",
   "key_profiles": {
     "ops1": {

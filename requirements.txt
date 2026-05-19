@@ -15,6 +15,7 @@ openpyxl>=3.1.5
 
 # HTTP requests for Feishu API
 requests>=2.32.5
+volcengine>=1.0.222
 
 # Production WSGI server
 gunicorn>=23.0.0

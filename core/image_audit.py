@@ -11,6 +11,12 @@ from typing import Any, Dict, List
 
 from PIL import Image, ImageFilter, ImageStat
 
+from .config import load_config
+from .volcengine_ocr import (
+    run_ocr_on_images_with_volcengine,
+    volcengine_config_ready,
+)
+
 logger = logging.getLogger(__name__)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -96,8 +102,19 @@ def _get_ocr_timeout_seconds() -> float:
     return max(0.0, timeout_seconds)
 
 
+def _get_ocr_provider(config: Dict[str, Any]) -> str:
+    provider = str(os.getenv("OCR_PROVIDER") or config.get("ocr_provider") or "").strip().lower()
+    if provider:
+        return provider
+    if volcengine_config_ready(config):
+        return "volcengine"
+    if _get_ocr_timeout_seconds() > 0:
+        return "paddle"
+    return "disabled"
+
+
 def run_ocr_on_images(image_paths: List[str]) -> Dict[str, Any]:
-    """Run PaddleOCR out-of-process so main text audit remains isolated."""
+    """Run OCR with the configured provider and keep the response shape stable."""
     unique_paths = [path for path in dict.fromkeys(image_paths) if path]
     logger.info("OCR request received: image_count=%s", len(unique_paths))
     if not unique_paths:
@@ -109,6 +126,47 @@ def run_ocr_on_images(image_paths: List[str]) -> Dict[str, Any]:
             "skip_reason": "",
         }
 
+    config = load_config()
+    provider = _get_ocr_provider(config)
+    logger.info("OCR provider selected: %s", provider)
+
+    if provider in {"disabled", "off", "none"}:
+        reason = "OCR 已禁用"
+        logger.info("%s: provider=%s", reason, provider)
+        return {
+            "texts": [],
+            "merged_text": "",
+            "errors": [reason],
+            "available": False,
+            "skip_reason": reason,
+        }
+
+    if provider == "volcengine":
+        return run_ocr_on_images_with_volcengine(unique_paths, config=config)
+
+    if provider in {"volcengine_fallback_paddle", "paddle_fallback_volcengine"}:
+        paddle_result = _run_paddle_ocr(unique_paths)
+        if paddle_result.get("merged_text") or paddle_result.get("available", True):
+            return paddle_result
+        logger.info("Paddle OCR unavailable, falling back to Volcengine OCR")
+        return run_ocr_on_images_with_volcengine(unique_paths, config=config)
+
+    if provider != "paddle":
+        reason = f"Unknown OCR provider: {provider}"
+        logger.warning(reason)
+        return {
+            "texts": [],
+            "merged_text": "",
+            "errors": [reason],
+            "available": False,
+            "skip_reason": reason,
+        }
+
+    return _run_paddle_ocr(unique_paths)
+
+
+def _run_paddle_ocr(unique_paths: List[str]) -> Dict[str, Any]:
+    """Run PaddleOCR out-of-process so main text audit remains isolated."""
     timeout_seconds = _get_ocr_timeout_seconds()
     if timeout_seconds <= 0:
         reason = "OCR 已通过 OCR_TIMEOUT_SECONDS=0 禁用"
