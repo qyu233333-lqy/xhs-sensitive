@@ -267,6 +267,16 @@ def handle_config():
             safe_config = {k: v for k, v in config.items() if k not in ["api_key", "feishu_app_secret", "session_secret"]}
             safe_config["has_api_key"] = bool(config.get("api_key")) or has_any_profile_key
             safe_config["has_feishu_secret"] = bool(config.get("feishu_app_secret"))
+            volcengine_config = dict(config.get("volcengine") or {})
+            access_key = str(volcengine_config.get("access_key") or "")
+            secret_key = str(volcengine_config.get("secret_key") or "")
+            if access_key:
+                volcengine_config["access_key_display"] = f"{access_key[:6]}***{access_key[-4:]}"
+            if secret_key:
+                volcengine_config["secret_key_display"] = f"{secret_key[:4]}***{secret_key[-4:]}"
+            volcengine_config.pop("access_key", None)
+            volcengine_config.pop("secret_key", None)
+            safe_config["volcengine"] = volcengine_config
             safe_config["key_profiles"] = get_key_profiles_metadata(config)
             safe_config["default_profile_id"] = config.get("default_profile_id", "ops1")
             safe_config["auth"] = get_safe_auth_metadata(config)
@@ -280,8 +290,21 @@ def handle_config():
             # 更新配置
             for key, value in data.items():
                 if key in ["api_key", "base_url", "model", "feishu_app_id", "feishu_app_secret",
-                          "project_config_path", "project_config_feishu_url", "enable_project_audit", "session_secret"]:
+                          "project_config_path", "project_config_feishu_url", "enable_project_audit", "session_secret",
+                          "ocr_provider"]:
                     config[key] = value
+                elif key == "volcengine" and isinstance(value, dict):
+                    volcengine_config = config.get("volcengine") or {}
+                    for volc_key in [
+                        "access_key", "secret_key", "region", "service", "host",
+                        "ocr_action", "ocr_version", "mode", "filter_thresh", "approximate_pixel"
+                    ]:
+                        if volc_key not in value:
+                            continue
+                        if volc_key in {"access_key", "secret_key"} and not value[volc_key]:
+                            continue
+                        volcengine_config[volc_key] = value[volc_key]
+                    config["volcengine"] = volcengine_config
                 elif key == "auth" and isinstance(value, dict):
                     auth_config = config.get("auth") or {}
                     for auth_key in [

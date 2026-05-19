@@ -178,6 +178,28 @@ body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
         <input type="password" id="feishuAppSecret" placeholder="飞书应用密钥">
       </div>
       <div class="setting-row">
+        <label>OCR Provider</label>
+        <select id="ocrProvider">
+          <option value="">自动</option>
+          <option value="volcengine">volcengine</option>
+          <option value="paddle">paddle</option>
+          <option value="paddle_fallback_volcengine">paddle_fallback_volcengine</option>
+          <option value="disabled">disabled</option>
+        </select>
+      </div>
+      <div class="setting-row">
+        <label>火山 Access Key</label>
+        <input type="password" id="volcengineAccessKey" placeholder="AKLT...">
+      </div>
+      <div class="setting-row">
+        <label>火山 Secret Key</label>
+        <input type="password" id="volcengineSecretKey" placeholder="Secret Access Key">
+      </div>
+      <div class="setting-row">
+        <label>火山 Region</label>
+        <input type="text" id="volcengineRegion" placeholder="cn-north-1">
+      </div>
+      <div class="setting-row">
         <label>启用钉钉登录</label>
         <select id="authEnabled">
           <option value="false">否</option>
@@ -334,6 +356,18 @@ async function loadConfig() {
     if (cfg.feishu_secret_display) {
       document.getElementById('feishuAppSecret').placeholder = '已保存: ' + cfg.feishu_secret_display;
     }
+    if (cfg.ocr_provider !== undefined && cfg.ocr_provider !== null) {
+      document.getElementById('ocrProvider').value = cfg.ocr_provider;
+    }
+    if (cfg.volcengine) {
+      if (cfg.volcengine.region) document.getElementById('volcengineRegion').value = cfg.volcengine.region;
+      if (cfg.volcengine.access_key_display) {
+        document.getElementById('volcengineAccessKey').placeholder = '已保存: ' + cfg.volcengine.access_key_display;
+      }
+      if (cfg.volcengine.secret_key_display) {
+        document.getElementById('volcengineSecretKey').placeholder = '已保存: ' + cfg.volcengine.secret_key_display;
+      }
+    }
     if (cfg.auth) {
       document.getElementById('authEnabled').value = String(!!cfg.auth.enabled);
       if (cfg.auth.app_key) document.getElementById('dingtalkAppKey').value = cfg.auth.app_key;
@@ -441,6 +475,12 @@ async function saveConfig() {
     model: document.getElementById('model').value,
     feishu_app_id: document.getElementById('feishuAppId').value.trim(),
     project_config_feishu_url: document.getElementById('projectConfigFeishuUrl').value.trim(),
+    ocr_provider: document.getElementById('ocrProvider').value,
+    volcengine: {
+      access_key: document.getElementById('volcengineAccessKey').value.trim(),
+      secret_key: document.getElementById('volcengineSecretKey').value.trim(),
+      region: document.getElementById('volcengineRegion').value.trim(),
+    },
     auth: {
       enabled: document.getElementById('authEnabled').value === 'true',
       dingtalk_app_key: document.getElementById('dingtalkAppKey').value.trim(),
@@ -465,6 +505,16 @@ async function saveConfig() {
     if (feishuSecret) {
       document.getElementById('feishuAppSecret').value = '';
       document.getElementById('feishuAppSecret').placeholder = '已保存: ' + feishuSecret.slice(0,4) + '***' + feishuSecret.slice(-4);
+    }
+    const volcengineAccessKey = data.volcengine.access_key;
+    const volcengineSecretKey = data.volcengine.secret_key;
+    if (volcengineAccessKey) {
+      document.getElementById('volcengineAccessKey').value = '';
+      document.getElementById('volcengineAccessKey').placeholder = '已保存: ' + volcengineAccessKey.slice(0,6) + '***' + volcengineAccessKey.slice(-4);
+    }
+    if (volcengineSecretKey) {
+      document.getElementById('volcengineSecretKey').value = '';
+      document.getElementById('volcengineSecretKey').placeholder = '已保存: ' + volcengineSecretKey.slice(0,4) + '***' + volcengineSecretKey.slice(-4);
     }
     document.getElementById('dingtalkAppSecret').value = '';
     toggleSettings();
