@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import queue
 import re
 import threading
 import time
@@ -570,23 +571,52 @@ def start_review(task_id):
         task_data.pop("error", None)
         _save_task(task_data)
 
-        def generate_progress():
+        progress_queue: "queue.Queue[Optional[Dict[str, Any]]]" = queue.Queue()
+        worker_state = {"failed": False}
+
+        def review_worker():
             try:
-                # 启动审核流程
                 for progress_data in process_review_task(task_data):
-                    yield f"data: {json.dumps(progress_data, ensure_ascii=False)}\n\n"
+                    progress_queue.put(progress_data)
 
                 task_data["status"] = "completed"
                 _save_task(task_data)
+                progress_queue.put(None)
 
             except Exception as e:
                 logger.error(f"Review process failed for task {task_id}: {e}")
                 task_data["status"] = "failed"
                 task_data["error"] = str(e)
                 _save_task(task_data)
-                yield f"data: {json.dumps({'type': 'error', 'msg': str(e)}, ensure_ascii=False)}\n\n"
+                worker_state["failed"] = True
+                progress_queue.put({"type": "error", "msg": str(e)})
+                progress_queue.put(None)
 
-        return Response(generate_progress(), mimetype='text/event-stream')
+        threading.Thread(target=review_worker, daemon=True).start()
+
+        def generate_progress():
+            heartbeat_interval = 10
+            while True:
+                try:
+                    progress_data = progress_queue.get(timeout=heartbeat_interval)
+                except queue.Empty:
+                    yield ": keep-alive\n\n"
+                    continue
+
+                if progress_data is None:
+                    break
+
+                yield f"data: {json.dumps(progress_data, ensure_ascii=False)}\n\n"
+
+            # Send a final heartbeat-shaped frame so proxies flush trailing bytes.
+            if not worker_state["failed"]:
+                yield ": stream-complete\n\n"
+
+        response = Response(generate_progress(), mimetype='text/event-stream')
+        response.headers["Cache-Control"] = "no-cache"
+        response.headers["X-Accel-Buffering"] = "no"
+        response.headers["Connection"] = "keep-alive"
+        return response
 
     except Exception as e:
         logger.error(f"Failed to start review for task {task_id}: {e}")

@@ -728,6 +728,34 @@ async function startFillApprovedContentJob(taskId, btn, extraBtn) {
   alert(result.message + `（更新 ${result.updated} 条，跳过 ${result.skipped} 条）`);
 }
 
+async function handleReviewStreamDisconnect(taskId) {
+  try {
+    const resp = await fetch(`/api/tasks/${taskId}/status`);
+    const data = await parseJsonSafely(resp);
+    if (data.error) {
+      document.getElementById('progressText').textContent = '连接中断，且无法获取任务状态';
+      return;
+    }
+
+    if (data.status === 'processing') {
+      document.getElementById('progressText').textContent = '连接短暂中断，任务仍在后台执行，请稍候或刷新后重试查看进度';
+      return;
+    }
+
+    if (data.status === 'completed') {
+      document.getElementById('progressText').textContent = '审核已在后台完成，请重新解析表格查看最新结果';
+      return;
+    }
+
+    if (data.status === 'failed') {
+      document.getElementById('progressText').textContent = data.error || '审核失败';
+      return;
+    }
+  } catch (e) {
+    document.getElementById('progressText').textContent = '连接中断，请稍后重试';
+  }
+}
+
 // ─── Review ───
 function startReview() {
   if (!currentTaskId) return;
@@ -788,7 +816,7 @@ function startReview() {
 
   es.onerror = () => {
     es.close();
-    document.getElementById('progressText').textContent = '连接中断，请检查设置后重试';
+    handleReviewStreamDisconnect(currentTaskId);
   };
 }
 
