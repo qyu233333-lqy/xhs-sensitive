@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(python3:*)",
+      "Bash(pip3 install:*)",
+      "Bash(curl -s http://localhost:8000/)",
+      "Bash(curl -s -X POST http://localhost:8000/api/parse-url -H 'Content-Type: application/json' -d '{\"url\": \"https://my.feishu.cn/sheets/AtX3sh4hphis1xtg1yzczpVbngf?table=tblOI4hCdkmyr1o5&view=vewdHnoCSf&sheet=OKkuCx\"}')",
+      "Bash(ls uploads/*.xlsx)",
+      "Bash(curl -s -X POST http://localhost:8000/api/upload -F file=@__CMDSUB_OUTPUT__)",
+      "Bash(curl -s -X POST http://localhost:8000/api/upload -F file=@test_data.xlsx)",
+      "Bash(curl -s http://localhost:8000/api/review/a5803aec)",
+      "Bash(curl -s http://localhost:8000/api/review/18e4db42)",
+      "Bash(ls:*)",
+      "WebFetch(domain:www.volcengine.com)",
+      "WebSearch",
+      "Bash(ps -p 53390 -o pid=,command=)",
+      "Bash(ipconfig getifaddr:*)"
+    ]
+  }
+}

@@ -1,17 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python:*)",
-      "Bash(python3:*)",
-      "Bash(pip3 install:*)",
-      "Bash(curl -s http://localhost:8000/)",
-      "Bash(curl -s -X POST http://localhost:8000/api/parse-url -H 'Content-Type: application/json' -d '{\"url\": \"https://my.feishu.cn/sheets/AtX3sh4hphis1xtg1yzczpVbngf?table=tblOI4hCdkmyr1o5&view=vewdHnoCSf&sheet=OKkuCx\"}')",
-      "Bash(ls uploads/*.xlsx)",
-      "Bash(curl -s -X POST http://localhost:8000/api/upload -F file=@__CMDSUB_OUTPUT__)",
-      "Bash(curl -s -X POST http://localhost:8000/api/upload -F file=@test_data.xlsx)",
-      "Bash(curl -s http://localhost:8000/api/review/a5803aec)",
-      "Bash(curl -s http://localhost:8000/api/review/18e4db42)",
-      "Bash(ls:*)"
+      "Bash(cp \"/Users/qingyu/Desktop/截屏2026-06-05 14.02.09.png\" \"/Users/qingyu/work/BIE/brand-intelligence-engine 2/manual-assets/step-16-topic-production-workbench.png\")",
+      "Bash(cp \"/Users/qingyu/Desktop/截屏2026-06-05 14.03.36.png\" \"/Users/qingyu/work/BIE/brand-intelligence-engine 2/manual-assets/step-17-topic-count-modal.png\")",
+      "Bash(cp \"/Users/qingyu/Desktop/截屏2026-06-05 14.04.17.png\" \"/Users/qingyu/work/BIE/brand-intelligence-engine 2/manual-assets/step-18-topic-count-response.png\")",
+      "Bash(cp \"/Users/qingyu/Desktop/截屏2026-06-05 14.05.09.png\" \"/Users/qingyu/work/BIE/brand-intelligence-engine 2/manual-assets/step-19-topic-workbench.png\")",
+      "Bash(cp \"/Users/qingyu/Desktop/截屏2026-06-05 14.28.26.png\" \"/Users/qingyu/work/BIE/brand-intelligence-engine 2/manual-assets/step-20-article-generated.png\")"
     ]
   }
 }
