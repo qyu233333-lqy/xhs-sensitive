@@ -147,6 +147,12 @@ def extract_review_doc_sections(content: str) -> Dict[str, str]:
     comment_lines: List[str] = []
     section = None
 
+    def _extract_inline_value(line: str, pattern: str) -> Optional[str]:
+        match = re.match(pattern, line)
+        if not match:
+            return None
+        return (match.group(1) or "").strip()
+
     def _is_title_header(line: str) -> bool:
         return bool(re.match(r"^(?:[一二三四五六七八九十1234567890ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+[、.．\- ]*)?标题\s*[：:]?$", line))
 
@@ -160,6 +166,33 @@ def extract_review_doc_sections(content: str) -> Dict[str, str]:
         return bool(re.match(r"^(?:[一二三四五六七八九十1234567890ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+[、.．\- ]*)?(?:内容概述|参考视频|脚本内容|视频时长|视频尺寸)\s*[：:]?", line))
 
     for line in lines:
+        inline_title = _extract_inline_value(
+            line,
+            r"^(?:[一二三四五六七八九十1234567890ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+[、.．\- ]*)?标题\s*[：:]\s*(.+)$",
+        )
+        if inline_title is not None:
+            section = "title"
+            title_lines.append(inline_title)
+            continue
+
+        inline_body = _extract_inline_value(
+            line,
+            r"^(?:[一二三四五六七八九十1234567890ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+[、.．\- ]*)?(?:发布文案|文案|正文|内容)\s*[：:]\s*(.+)$",
+        )
+        if inline_body is not None:
+            section = "body"
+            body_lines.append(inline_body)
+            continue
+
+        inline_comment = _extract_inline_value(
+            line,
+            r"^(?:评论区置顶|置顶评论|评论区文案)\s*[：:]\s*(.+)$",
+        )
+        if inline_comment is not None:
+            section = "comment"
+            comment_lines.append(inline_comment)
+            continue
+
         if _is_title_header(line):
             section = "title"
             continue
@@ -827,6 +860,63 @@ def write_bitable_records(app_token: str, table_id: str, app_id: str, app_secret
         return False
 
 
+def create_bitable_attachment_fields(
+    app_token: str,
+    table_id: str,
+    app_id: str,
+    app_secret: str,
+    field_names: List[str],
+) -> Dict[str, Any]:
+    """为多维表格批量补建附件字段。"""
+    try:
+        token = get_feishu_token(app_id, app_secret)
+        if not token:
+            return {"ok": False, "error": "获取飞书访问令牌失败", "created": []}
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+        create_url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields"
+        created: List[str] = []
+
+        for field_name in field_names:
+            response = http_requests.post(
+                create_url,
+                headers=headers,
+                json={
+                    "field_name": field_name,
+                    "type": 17,  # 附件
+                    "property": {},
+                },
+                timeout=20,
+            )
+
+            if response.status_code != 200:
+                return {"ok": False, "error": f"创建字段 {field_name} 失败: HTTP {response.status_code}", "created": created}
+
+            result = response.json()
+            if result.get("code") != 0:
+                return {
+                    "ok": False,
+                    "error": f"创建字段 {field_name} 失败: {result.get('msg', 'Unknown error')}",
+                    "created": created,
+                }
+
+            created.append(field_name)
+
+        if created:
+            logger.info(
+                "Successfully created %s bitable attachment fields: %s",
+                len(created),
+                ", ".join(created),
+            )
+        return {"ok": True, "created": created}
+    except Exception as e:
+        logger.error("Failed to create bitable attachment fields: %s", e)
+        return {"ok": False, "error": str(e), "created": []}
+
+
 def add_feishu_comment(doc_url: str, app_id: str, app_secret: str, comment: str) -> bool:
     """为飞书文档添加评论
 
@@ -1106,10 +1196,21 @@ def fetch_feishu_doc_images(url: str, app_id: str, app_secret: str,
                 "errors": blocks_result["errors"],
             }
 
-        file_tokens = _extract_docx_image_tokens_from_blocks(blocks_result.get("blocks") or [])
+        image_token_meta = _extract_docx_image_tokens_for_fill(blocks_result.get("blocks") or [])
+        file_tokens = image_token_meta.get("all_tokens") or []
+        fill_tokens = image_token_meta.get("fill_tokens") or []
+        cover_tokens = image_token_meta.get("cover_tokens") or []
+        body_tokens = image_token_meta.get("body_tokens") or []
         logger.info("Extracted %s candidate image tokens from doc %s", len(file_tokens), docx_token)
         if not file_tokens:
-            return {"url": resolved_url, "image_paths": [], "errors": []}
+            return {
+                "url": resolved_url,
+                "image_paths": [],
+                "fill_image_paths": [],
+                "cover_image_paths": [],
+                "body_image_paths": [],
+                "errors": [],
+            }
 
         if output_dir is None:
             base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1118,6 +1219,7 @@ def fetch_feishu_doc_images(url: str, app_id: str, app_secret: str,
 
         image_paths = []
         errors = []
+        token_to_path: Dict[str, str] = {}
         for index, file_token in enumerate(file_tokens, start=1):
             tmp_url = _get_feishu_tmp_download_url(file_token, headers)
             if not tmp_url:
@@ -1135,13 +1237,32 @@ def fetch_feishu_doc_images(url: str, app_id: str, app_secret: str,
                 with open(local_path, "wb") as image_file:
                     image_file.write(download_response.content)
                 image_paths.append(local_path)
+                token_to_path[file_token] = local_path
             except Exception as exc:  # pragma: no cover - network issues are environmental
                 errors.append(f"图片下载异常 {file_token}: {exc}")
 
-        return {"url": resolved_url, "image_paths": image_paths, "errors": errors}
+        fill_image_paths = [token_to_path[token] for token in fill_tokens if token in token_to_path]
+        cover_image_paths = [token_to_path[token] for token in cover_tokens if token in token_to_path]
+        body_image_paths = [token_to_path[token] for token in body_tokens if token in token_to_path]
+
+        return {
+            "url": resolved_url,
+            "image_paths": image_paths,
+            "fill_image_paths": fill_image_paths,
+            "cover_image_paths": cover_image_paths,
+            "body_image_paths": body_image_paths,
+            "errors": errors,
+        }
     except Exception as e:
         logger.error(f"Failed to fetch doc images from {resolved_url}: {e}")
-        return {"url": resolved_url, "image_paths": [], "errors": [str(e)]}
+        return {
+            "url": resolved_url,
+            "image_paths": [],
+            "fill_image_paths": [],
+            "cover_image_paths": [],
+            "body_image_paths": [],
+            "errors": [str(e)],
+        }
 
 
 def download_feishu_doc_snapshot(url: str, app_id: str, app_secret: str, output_dir: Optional[str] = None) -> Dict[str, str]:
@@ -1292,6 +1413,154 @@ def _extract_docx_image_tokens(docx_data: Dict[str, Any]) -> List[str]:
 def _extract_docx_image_tokens_from_blocks(blocks: List[Dict[str, Any]]) -> List[str]:
     wrapped = {"document": {"body": {"blocks": blocks}}}
     return _extract_docx_image_tokens(wrapped)
+
+
+def _extract_block_plain_text(block: Dict[str, Any]) -> str:
+    text_node = block.get("text")
+    if not isinstance(text_node, dict):
+        return ""
+
+    parts: List[str] = []
+    for element in text_node.get("elements") or []:
+        text_run = element.get("text_run") or {}
+        content = str(text_run.get("content") or "")
+        if content:
+            parts.append(content)
+    return "".join(parts).strip()
+
+
+def _extract_docx_image_tokens_for_fill(blocks: List[Dict[str, Any]]) -> Dict[str, List[str]]:
+    """提取适合回填到表格中的图片 token。
+
+    规则：
+    - 正文配图按文档出现顺序保留
+    - 封面图单独识别
+    - 回填顺序为 封面图优先，其后是正文配图
+    - 评论区后的图片、成片/脚本等后续模块中的图片默认不参与回填
+    """
+    all_tokens = _extract_docx_image_tokens_from_blocks(blocks)
+    if not blocks:
+        return {
+            "all_tokens": all_tokens,
+            "fill_tokens": all_tokens,
+            "cover_tokens": [],
+            "body_tokens": all_tokens,
+        }
+
+    zone = "other"
+    body_tokens: List[str] = []
+    cover_tokens: List[str] = []
+
+    def _dedupe(values: List[str]) -> List[str]:
+        result: List[str] = []
+        for value in values:
+            if value and value not in result:
+                result.append(value)
+        return result
+
+    for block in blocks:
+        line = _extract_block_plain_text(block)
+        normalized = re.sub(r"\s+", "", line.replace("：", ":"))
+
+        if normalized.startswith(("评论区置顶:", "置顶评论:", "评论区文案:")):
+            zone = "comment"
+        elif normalized in {"评论区置顶", "置顶评论", "评论区文案"}:
+            zone = "comment"
+        elif normalized.startswith("封面:") or normalized == "封面":
+            zone = "cover"
+        elif normalized.startswith(("视频成片:", "成片:", "视频成片", "成片")):
+            zone = "asset"
+        elif re.match(r"^[二三四五六七八九十]+、", normalized):
+            zone = "other"
+        elif any(keyword in normalized for keyword in ("笔记配图", "配图", "发布文案+成片", "发布文案", "正文", "标题")):
+            zone = "body"
+
+        if block.get("block_type") != 27:
+            continue
+
+        image_node = block.get("image") or {}
+        token = str(
+            image_node.get("token")
+            or image_node.get("file_token")
+            or image_node.get("image_token")
+            or ""
+        ).strip()
+        if not _looks_like_media_token(token):
+            continue
+
+        if zone == "cover":
+            cover_tokens.append(token)
+        elif zone == "body":
+            body_tokens.append(token)
+
+    cover_tokens = _dedupe(cover_tokens)
+    body_tokens = _dedupe(body_tokens)
+    fill_tokens = _dedupe(cover_tokens + body_tokens)
+
+    if not fill_tokens:
+        fill_tokens = all_tokens
+        body_tokens = all_tokens
+
+    return {
+        "all_tokens": all_tokens,
+        "fill_tokens": fill_tokens,
+        "cover_tokens": cover_tokens,
+        "body_tokens": body_tokens,
+    }
+
+
+def upload_feishu_bitable_media(file_path: str, app_token: str, app_id: str, app_secret: str) -> Dict[str, Any]:
+    """上传本地图片到飞书，返回可写入 bitable 附件列的文件信息。"""
+    try:
+        token = get_feishu_token(app_id, app_secret)
+        if not token:
+            return {"ok": False, "error": "获取飞书访问令牌失败"}
+
+        path = os.path.abspath(file_path)
+        if not os.path.exists(path):
+            return {"ok": False, "error": f"文件不存在: {path}"}
+
+        file_name = os.path.basename(path)
+        file_size = os.path.getsize(path)
+        content_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
+        upload_url = "https://open.feishu.cn/open-apis/drive/v1/medias/upload_all"
+        headers = {"Authorization": f"Bearer {token}"}
+
+        with open(path, "rb") as file_obj:
+            response = http_requests.post(
+                upload_url,
+                headers=headers,
+                data={
+                    "file_name": file_name,
+                    "parent_type": "bitable_file",
+                    "parent_node": app_token,
+                    "size": str(file_size),
+                },
+                files={"file": (file_name, file_obj, content_type)},
+                timeout=60,
+            )
+
+        if response.status_code != 200:
+            return {"ok": False, "error": f"飞书上传图片失败: HTTP {response.status_code}"}
+
+        result = response.json()
+        if result.get("code") != 0:
+            return {"ok": False, "error": f"飞书上传图片失败: {result.get('msg', 'Unknown error')}"}
+
+        file_token = str(result.get("data", {}).get("file_token") or "").strip()
+        if not file_token:
+            return {"ok": False, "error": "飞书上传图片成功但未返回 file_token"}
+
+        return {
+            "ok": True,
+            "file_token": file_token,
+            "name": file_name,
+            "size": file_size,
+            "type": content_type,
+        }
+    except Exception as e:
+        logger.error("Failed to upload media to Feishu bitable: %s", e)
+        return {"ok": False, "error": str(e)}
 
 
 def _fetch_feishu_doc_blocks(docx_token: str, headers: Dict[str, str]) -> Dict[str, Any]:

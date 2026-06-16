@@ -18,10 +18,12 @@ from core.auth import (
     clear_authenticated_user,
     effective_profile_id,
     exchange_code_for_user_token,
+    fetch_dingtalk_user_info_by_code,
     fetch_dingtalk_user_info,
     get_auth_status,
     get_current_user,
     is_auth_enabled,
+    is_dingtalk_in_app_mode,
     is_auth_ready,
     login_required,
     resolve_user_access,
@@ -30,9 +32,12 @@ from core.auth import (
 from core.config import get_key_profiles_metadata, get_safe_auth_metadata, load_config, save_config
 from core.project import clear_project_configs_cache, load_project_configs, save_project_config
 from core.feishu import (
+    create_bitable_attachment_fields,
     download_feishu_doc_snapshot,
     extract_review_doc_sections,
+    fetch_feishu_doc_images,
     fetch_feishu_sheet,
+    upload_feishu_bitable_media,
     validate_feishu_config,
     write_bitable_records,
 )
@@ -169,6 +174,27 @@ def _run_fill_approved_content(task_id: str) -> None:
         updates = []
         processed = 0
         skipped = 0
+        image_field_name = "图片/视频+封面" if "图片/视频+封面" in headers else None
+        app_token = sheet_data.get("app_token") or sheet_data.get("spreadsheet_id")
+        split_image_field_names = [f"图片{i}" for i in range(1, 13)]
+        missing_split_fields = [name for name in split_image_field_names if name not in headers]
+
+        if missing_split_fields and app_token:
+            create_result = create_bitable_attachment_fields(
+                app_token,
+                sheet_data["sheet_id"],
+                config["feishu_app_id"],
+                config["feishu_app_secret"],
+                missing_split_fields,
+            )
+            if not create_result.get("ok"):
+                raise ValueError(f"自动创建图片列失败: {create_result.get('error')}")
+            headers.update(create_result.get("created") or [])
+            logger.info(
+                "Auto-created split image fields for fill task %s: %s",
+                task_id,
+                ", ".join(create_result.get("created") or []),
+            )
 
         for idx, row in enumerate(rows, 1):
             fill_job["processed_rows"] = idx
@@ -196,6 +222,56 @@ def _run_fill_approved_content(task_id: str) -> None:
                 value = str(sections.get(field_name) or "").strip()
                 if value:
                     fields[field_name] = value
+
+            if image_field_name and app_token:
+                image_bundle = fetch_feishu_doc_images(
+                    link_value,
+                    config["feishu_app_id"],
+                    config["feishu_app_secret"],
+                )
+                fill_image_paths = image_bundle.get("fill_image_paths") or []
+                fill_image_paths = fill_image_paths[:12]
+                if fill_image_paths:
+                    attachments = []
+                    split_attachments = {}
+                    for image_path in fill_image_paths:
+                        upload_result = upload_feishu_bitable_media(
+                            image_path,
+                            app_token,
+                            config["feishu_app_id"],
+                            config["feishu_app_secret"],
+                        )
+                        if not upload_result.get("ok"):
+                            logger.warning(
+                                "Fill image upload failed: task_id=%s record_id=%s path=%s error=%s",
+                                task_id,
+                                record_id,
+                                image_path,
+                                upload_result.get("error"),
+                            )
+                            continue
+                        attachment_value = {
+                            "file_token": upload_result["file_token"],
+                            "name": upload_result.get("name", ""),
+                            "size": upload_result.get("size", 0),
+                            "type": upload_result.get("type", ""),
+                        }
+                        attachments.append(attachment_value)
+                        split_index = len(attachments)
+                        if split_index <= 12:
+                            split_attachments[f"图片{split_index}"] = [attachment_value]
+
+                    if attachments:
+                        fields[image_field_name] = attachments
+                        for split_field_name in split_image_field_names:
+                            fields[split_field_name] = split_attachments.get(split_field_name, [])
+                        logger.info(
+                            "Fill image overwrite prepared: task_id=%s record_id=%s replace_count=%s split_fields=%s",
+                            task_id,
+                            record_id,
+                            len(attachments),
+                            len(split_attachments),
+                        )
 
             if not fields:
                 skipped += 1
@@ -309,7 +385,8 @@ def handle_config():
                 elif key == "auth" and isinstance(value, dict):
                     auth_config = config.get("auth") or {}
                     for auth_key in [
-                        "enabled", "dingtalk_app_key", "dingtalk_app_secret",
+                        "enabled", "mode", "dingtalk_corp_id", "dingtalk_agent_id",
+                        "dingtalk_app_key", "dingtalk_app_secret",
                         "dingtalk_redirect_uri", "dingtalk_scope", "user_mapping_path"
                     ]:
                         if auth_key in value:
@@ -773,12 +850,52 @@ def auth_dingtalk_login():
         config = load_config()
         if not is_auth_enabled(config):
             return safe_json_response({"error": "钉钉登录未启用"}, 400)
+        if is_dingtalk_in_app_mode(config):
+            return safe_json_response({"error": "当前为钉钉内免登模式，请在钉钉客户端中打开应用"}, 400)
         if not is_auth_ready(config):
             return safe_json_response({"error": "钉钉登录配置不完整"}, 503)
         return redirect(build_dingtalk_login_url(config))
     except Exception as e:
         logger.error(f"Failed to start DingTalk login: {e}")
         return redirect(build_callback_redirect("login_failed"))
+
+
+@api_bp.route("/auth/dingtalk/in-app-login", methods=["POST"])
+def auth_dingtalk_in_app_login():
+    try:
+        config = load_config()
+        if not is_auth_enabled(config):
+            return safe_json_response({"error": "钉钉登录未启用"}, 400)
+        if not is_dingtalk_in_app_mode(config):
+            return safe_json_response({"error": "当前未启用钉钉内免登模式"}, 400)
+        if not is_auth_ready(config):
+            return safe_json_response({"error": "钉钉免登配置不完整"}, 503)
+
+        payload = request.get_json() or {}
+        auth_code = str(payload.get("auth_code") or payload.get("code") or "").strip()
+        if not auth_code:
+            return safe_json_response({"error": "缺少钉钉免登 code"}, 400)
+
+        user_info = fetch_dingtalk_user_info_by_code(auth_code, config)
+        auth_user = resolve_user_access(user_info, config)
+        store_authenticated_user(auth_user)
+        logger.info(
+            "Authenticated DingTalk in-app user: %s -> %s",
+            auth_user.get("display_name"),
+            auth_user.get("profile_id"),
+        )
+        return safe_json_response({
+            "success": True,
+            "user": auth_user,
+        })
+    except PermissionError as e:
+        logger.warning(f"DingTalk in-app user denied: {e}")
+        clear_authenticated_user()
+        return safe_json_response({"error": str(e), "auth_required": True}, 403)
+    except Exception as e:
+        logger.error(f"Failed to complete DingTalk in-app login: {e}")
+        clear_authenticated_user()
+        return safe_json_response({"error": f"钉钉免登失败: {str(e)}"}, 500)
 
 
 @api_bp.route("/auth/dingtalk/callback", methods=["GET"])

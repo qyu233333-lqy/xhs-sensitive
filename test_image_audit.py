@@ -1,21 +1,16 @@
-import subprocess
 from unittest.mock import patch
 
 import core.image_audit as image_audit
 from core.volcengine_ocr import run_ocr_on_images_with_volcengine
 
 
-def test_run_ocr_on_images_timeout_is_skipped(monkeypatch):
+def test_run_ocr_on_images_rejects_unknown_provider(monkeypatch):
     monkeypatch.setenv("OCR_PROVIDER", "paddle")
-    monkeypatch.setenv("OCR_TIMEOUT_SECONDS", "5")
 
-    with patch.object(image_audit.os.path, "exists", return_value=True), \
-         patch.object(image_audit.subprocess, "run", side_effect=subprocess.TimeoutExpired(cmd=["ocr"], timeout=5)):
-        result = image_audit.run_ocr_on_images(["/tmp/image_1.jpg", "/tmp/image_2.jpg"])
+    result = image_audit.run_ocr_on_images(["/tmp/image_1.jpg", "/tmp/image_2.jpg"])
 
     assert result["available"] is False
-    assert "skip_reason" in result
-    assert "timed out" in result["skip_reason"]
+    assert result["skip_reason"] == "Unknown OCR provider: paddle"
     assert result["merged_text"] == ""
 
 

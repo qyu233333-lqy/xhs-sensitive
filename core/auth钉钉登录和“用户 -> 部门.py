@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import secrets
+import time
 from functools import wraps
 from typing import Any, Dict, Optional
 from urllib.parse import urlencode
@@ -16,6 +17,7 @@ from .config import load_config
 logger = logging.getLogger(__name__)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_APP_ACCESS_TOKEN_CACHE: Dict[str, Any] = {}
 
 
 def get_auth_config(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -24,21 +26,27 @@ def get_auth_config(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 
 
 def is_auth_enabled(config: Optional[Dict[str, Any]] = None) -> bool:
-    # DingTalk auth has been retired from the product flow.
-    # Keep the config structure for backward compatibility, but
-    # force the runtime behavior to local mode so existing saved
-    # auth settings cannot block parsing/review endpoints.
-    return False
+    auth_config = get_auth_config(config)
+    return bool(auth_config.get("enabled"))
 
 
 def is_auth_ready(config: Optional[Dict[str, Any]] = None) -> bool:
     auth_config = get_auth_config(config)
-    return bool(
-        auth_config.get("enabled")
-        and auth_config.get("dingtalk_app_key")
-        and auth_config.get("dingtalk_app_secret")
-        and auth_config.get("dingtalk_redirect_uri")
-    )
+    if not auth_config.get("enabled"):
+        return False
+
+    if not auth_config.get("dingtalk_app_key") or not auth_config.get("dingtalk_app_secret"):
+        return False
+
+    mode = str(auth_config.get("mode") or "in_app").strip() or "in_app"
+    if mode == "oauth":
+        return bool(auth_config.get("dingtalk_redirect_uri"))
+    return bool(auth_config.get("dingtalk_corp_id"))
+
+
+def is_dingtalk_in_app_mode(config: Optional[Dict[str, Any]] = None) -> bool:
+    auth_config = get_auth_config(config)
+    return str(auth_config.get("mode") or "in_app").strip() != "oauth"
 
 
 def _mapping_file_path(config: Optional[Dict[str, Any]] = None) -> str:
@@ -156,6 +164,34 @@ def _request_json(method: str, url: str, **kwargs) -> Dict[str, Any]:
     return data
 
 
+def get_dingtalk_app_access_token(config: Optional[Dict[str, Any]] = None, force_refresh: bool = False) -> str:
+    cfg = config or load_config()
+    auth_config = get_auth_config(cfg)
+    cache_key = f"{auth_config.get('dingtalk_app_key', '')}:{auth_config.get('app_access_token_url', '')}"
+    now = int(time.time())
+
+    if not force_refresh:
+        cached = _APP_ACCESS_TOKEN_CACHE.get(cache_key) or {}
+        if cached.get("token") and int(cached.get("expires_at", 0)) > now + 60:
+            return str(cached["token"])
+
+    payload = {
+        "appKey": auth_config.get("dingtalk_app_key", ""),
+        "appSecret": auth_config.get("dingtalk_app_secret", ""),
+    }
+    data = _request_json("POST", auth_config.get("app_access_token_url"), json=payload)
+    access_token = data.get("accessToken") or data.get("access_token")
+    if not access_token:
+        raise ValueError("未从钉钉返回中获取到应用 access token")
+
+    expire_in = int(data.get("expireIn") or data.get("expires_in") or 7200)
+    _APP_ACCESS_TOKEN_CACHE[cache_key] = {
+        "token": access_token,
+        "expires_at": now + expire_in,
+    }
+    return str(access_token)
+
+
 def exchange_code_for_user_token(code: str, config: Optional[Dict[str, Any]] = None) -> str:
     auth_config = get_auth_config(config)
     payload = {
@@ -177,6 +213,31 @@ def fetch_dingtalk_user_info(user_access_token: str, config: Optional[Dict[str, 
         "x-acs-dingtalk-access-token": user_access_token,
     }
     return _request_json("GET", auth_config.get("user_info_url"), headers=headers)
+
+
+def fetch_dingtalk_user_info_by_code(auth_code: str, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    cfg = config or load_config()
+    auth_config = get_auth_config(cfg)
+    app_access_token = get_dingtalk_app_access_token(cfg)
+    code_url = auth_config.get("user_info_by_code_url")
+    detail_url = auth_config.get("user_detail_url")
+
+    data = _request_json(
+        "POST",
+        f"{code_url}?access_token={app_access_token}",
+        json={"code": auth_code},
+    )
+    userid = str(data.get("userid") or data.get("userId") or "").strip()
+    if not userid:
+        raise ValueError("钉钉免登未返回 userid")
+
+    detail = _request_json(
+        "POST",
+        f"{detail_url}?access_token={app_access_token}",
+        json={"userid": userid},
+    )
+    detail.setdefault("userid", userid)
+    return detail
 
 
 def login_required(admin: bool = False):
@@ -219,11 +280,16 @@ def get_auth_status(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     auth_config = get_auth_config(cfg)
     mapping_count = len(load_user_mappings(cfg).get("users", [])) if os.path.exists(_mapping_file_path(cfg)) else 0
     return {
-        "enabled": False,
+        "enabled": is_auth_enabled(cfg),
+        "mode": auth_config.get("mode", "in_app"),
         "ready": is_auth_ready(cfg),
+        "in_dingtalk_mode": is_dingtalk_in_app_mode(cfg),
         "authenticated": bool(current_user),
-        "login_url": "",
+        "login_url": "/api/auth/dingtalk/login" if not is_dingtalk_in_app_mode(cfg) else "",
         "logout_url": "/api/auth/logout",
+        "corp_id": auth_config.get("dingtalk_corp_id", ""),
+        "agent_id": auth_config.get("dingtalk_agent_id", ""),
+        "app_key": auth_config.get("dingtalk_app_key", ""),
         "mapping_path": auth_config.get("user_mapping_path", "user_groups.json"),
         "mapping_count": mapping_count,
         "user": {

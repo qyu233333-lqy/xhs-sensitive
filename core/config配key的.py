@@ -35,13 +35,19 @@ def _default_auth_config() -> Dict[str, Any]:
     return {
         "enabled": False,
         "provider": "dingtalk",
+        "mode": "in_app",
+        "dingtalk_corp_id": "",
+        "dingtalk_agent_id": "",
         "dingtalk_app_key": "",
         "dingtalk_app_secret": "",
         "dingtalk_redirect_uri": "",
         "dingtalk_scope": "openid",
         "authorize_url": "https://login.dingtalk.com/oauth2/auth",
+        "app_access_token_url": "https://api.dingtalk.com/v1.0/oauth2/accessToken",
         "user_access_token_url": "https://api.dingtalk.com/v1.0/oauth2/userAccessToken",
         "user_info_url": "https://api.dingtalk.com/v1.0/contact/users/me",
+        "user_info_by_code_url": "https://oapi.dingtalk.com/topapi/v2/user/getuserinfo",
+        "user_detail_url": "https://oapi.dingtalk.com/topapi/v2/user/get",
         "user_mapping_path": "user_groups.json",
     }
 
@@ -161,12 +167,18 @@ def load_config() -> Dict[str, Any]:
 
     auth_env_mappings = {
         "DINGTALK_AUTH_ENABLED": ("enabled", "bool"),
+        "DINGTALK_AUTH_MODE": ("mode", "str"),
+        "DINGTALK_CORP_ID": ("dingtalk_corp_id", "str"),
+        "DINGTALK_AGENT_ID": ("dingtalk_agent_id", "str"),
         "DINGTALK_APP_KEY": ("dingtalk_app_key", "str"),
         "DINGTALK_APP_SECRET": ("dingtalk_app_secret", "str"),
         "DINGTALK_REDIRECT_URI": ("dingtalk_redirect_uri", "str"),
         "DINGTALK_SCOPE": ("dingtalk_scope", "str"),
         "DINGTALK_AUTHORIZE_URL": ("authorize_url", "str"),
+        "DINGTALK_APP_ACCESS_TOKEN_URL": ("app_access_token_url", "str"),
         "DINGTALK_USER_ACCESS_TOKEN_URL": ("user_access_token_url", "str"),
+        "DINGTALK_USER_INFO_BY_CODE_URL": ("user_info_by_code_url", "str"),
+        "DINGTALK_USER_DETAIL_URL": ("user_detail_url", "str"),
         "DINGTALK_USER_INFO_URL": ("user_info_url", "str"),
         "DINGTALK_USER_MAPPING_PATH": ("user_mapping_path", "str"),
     }
@@ -247,6 +259,9 @@ def get_safe_auth_metadata(config: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "enabled": bool(auth_config.get("enabled")),
         "provider": auth_config.get("provider", "dingtalk"),
+        "mode": auth_config.get("mode", "in_app"),
+        "corp_id": auth_config.get("dingtalk_corp_id", ""),
+        "agent_id": auth_config.get("dingtalk_agent_id", ""),
         "app_key": auth_config.get("dingtalk_app_key", ""),
         "has_app_key": bool(auth_config.get("dingtalk_app_key")),
         "has_app_secret": bool(auth_config.get("dingtalk_app_secret")),

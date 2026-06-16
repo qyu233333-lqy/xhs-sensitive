@@ -38,13 +38,19 @@
   "auth": {
     "enabled": true,
     "provider": "dingtalk",
+    "mode": "in_app",
+    "dingtalk_corp_id": "dingxxxx",
+    "dingtalk_agent_id": "123456789",
     "dingtalk_app_key": "dingxxxx",
     "dingtalk_app_secret": "your-dingtalk-app-secret",
     "dingtalk_redirect_uri": "http://your-host/api/auth/dingtalk/callback",
     "dingtalk_scope": "openid",
     "authorize_url": "https://login.dingtalk.com/oauth2/auth",
+    "app_access_token_url": "https://api.dingtalk.com/v1.0/oauth2/accessToken",
     "user_access_token_url": "https://api.dingtalk.com/v1.0/oauth2/userAccessToken",
     "user_info_url": "https://api.dingtalk.com/v1.0/contact/users/me",
+    "user_info_by_code_url": "https://oapi.dingtalk.com/topapi/v2/user/getuserinfo",
+    "user_detail_url": "https://oapi.dingtalk.com/topapi/v2/user/get",
     "user_mapping_path": "user_groups.json"
   },
 

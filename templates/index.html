@@ -121,6 +121,8 @@ body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
 .auth-tip { margin-top:12px; padding:10px 14px; border-radius:8px; font-size:13px; }
 .auth-tip.warn { background:#fff7e6; color:#ad6800; }
 .auth-tip.err { background:#fff2f0; color:#cf1322; }
+.auth-tip.info { background:#f0f5ff; color:#1d39c4; }
+.mode-hint { color:#666; font-size:12px; margin-top:4px; }
 </style>
 </head>
 <body>
@@ -182,8 +184,6 @@ body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
         <select id="ocrProvider">
           <option value="">自动</option>
           <option value="volcengine">volcengine</option>
-          <option value="paddle">paddle</option>
-          <option value="paddle_fallback_volcengine">paddle_fallback_volcengine</option>
           <option value="disabled">disabled</option>
         </select>
       </div>
@@ -207,6 +207,21 @@ body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
         </select>
       </div>
       <div class="setting-row">
+        <label>鉴权模式</label>
+        <select id="authMode" onchange="renderAuthModeFields()">
+          <option value="in_app">钉钉内免登</option>
+          <option value="oauth">网页登录回调</option>
+        </select>
+      </div>
+      <div class="setting-row auth-in-app-row">
+        <label>Corp ID</label>
+        <input type="text" id="dingtalkCorpId" placeholder="dingxxxxxxxx">
+      </div>
+      <div class="setting-row auth-in-app-row">
+        <label>Agent ID</label>
+        <input type="text" id="dingtalkAgentId" placeholder="可选，微应用 AgentId">
+      </div>
+      <div class="setting-row">
         <label>钉钉 App Key</label>
         <input type="text" id="dingtalkAppKey" placeholder="appKey">
       </div>
@@ -214,10 +229,11 @@ body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
         <label>钉钉 App Secret</label>
         <input type="password" id="dingtalkAppSecret" placeholder="appSecret">
       </div>
-      <div class="setting-row">
+      <div class="setting-row auth-oauth-row">
         <label>回调地址</label>
         <input type="text" id="dingtalkRedirectUri" placeholder="例如 http://你的域名/api/auth/dingtalk/callback">
       </div>
+      <div class="mode-hint">钉钉内免登适合公司员工从钉钉工作台进入；网页登录回调适合浏览器外链登录。</div>
       <div class="setting-row">
         <label>用户映射文件</label>
         <input type="text" id="userMappingPath" placeholder="默认 user_groups.json">
@@ -327,9 +343,11 @@ body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
 
 </div>
 
+<script src="https://g.alicdn.com/dingding/dingtalk-jsapi/3.1.2/dingtalk.open.js"></script>
 <script>
 let currentTaskId = null;
 let authState = null;
+let inAppLoginTried = false;
 
 function esc(s) {
   const el = document.createElement('span');
@@ -370,15 +388,29 @@ async function loadConfig() {
     }
     if (cfg.auth) {
       document.getElementById('authEnabled').value = String(!!cfg.auth.enabled);
+      document.getElementById('authMode').value = cfg.auth.mode || 'in_app';
+      if (cfg.auth.corp_id) document.getElementById('dingtalkCorpId').value = cfg.auth.corp_id;
+      if (cfg.auth.agent_id) document.getElementById('dingtalkAgentId').value = cfg.auth.agent_id;
       if (cfg.auth.app_key) document.getElementById('dingtalkAppKey').value = cfg.auth.app_key;
       if (cfg.auth.redirect_uri) document.getElementById('dingtalkRedirectUri').value = cfg.auth.redirect_uri;
       if (cfg.auth.user_mapping_path) document.getElementById('userMappingPath').value = cfg.auth.user_mapping_path;
       if (cfg.auth.has_app_secret) document.getElementById('dingtalkAppSecret').placeholder = '已保存: app secret';
     }
     updateConfigStatus(!!cfg.has_api_key);
+    renderAuthModeFields();
   } catch(e) {}
   await loadAuthState();
   loadKnowledgeBase();
+}
+
+function renderAuthModeFields() {
+  const mode = document.getElementById('authMode').value || 'in_app';
+  document.querySelectorAll('.auth-in-app-row').forEach(el => {
+    el.classList.toggle('hidden', mode !== 'in_app');
+  });
+  document.querySelectorAll('.auth-oauth-row').forEach(el => {
+    el.classList.toggle('hidden', mode !== 'oauth');
+  });
 }
 
 async function loadAuthState() {
@@ -436,17 +468,27 @@ function renderAuthState() {
     return;
   }
 
-  summary.innerHTML = '<strong>登录模式：</strong>已启用钉钉登录，但当前未登录。';
-  loginBtn.classList.remove('hidden');
+  const isInAppMode = authState.in_dingtalk_mode !== false;
+  summary.innerHTML = `<strong>登录模式：</strong>${isInAppMode ? '钉钉内免登' : '网页登录回调'}，当前未登录。`;
+  if (!isInAppMode) loginBtn.classList.remove('hidden');
   settingsCard.classList.toggle('hidden', !!authState.ready);
-  profileHint.textContent = '请先使用钉钉登录，系统会自动判断你所属的部门配置。';
+  profileHint.textContent = isInAppMode
+    ? '请在钉钉客户端内打开此应用，系统会自动识别你所属的部门配置。'
+    : '请先使用钉钉登录，系统会自动判断你所属的部门配置。';
   parseBtn.disabled = true;
   quickFillBtn.disabled = true;
 
   if (!authState.ready) {
-    tip.textContent = '钉钉登录已启用，但 App Key / App Secret / 回调地址 还未配置完整。';
+    tip.textContent = isInAppMode
+      ? '钉钉内免登已启用，但 Corp ID / App Key / App Secret 还未配置完整。'
+      : '钉钉登录已启用，但 App Key / App Secret / 回调地址 还未配置完整。';
     tip.className = 'auth-tip warn';
     tip.classList.remove('hidden');
+  } else if (isInAppMode) {
+    tip.textContent = '请从钉钉工作台打开本页面，前端会自动申请免登 code 并在服务端建立会话。';
+    tip.className = 'auth-tip info';
+    tip.classList.remove('hidden');
+    maybeStartInAppLogin();
   }
 
   const params = new URLSearchParams(window.location.search);
@@ -483,6 +525,9 @@ async function saveConfig() {
     },
     auth: {
       enabled: document.getElementById('authEnabled').value === 'true',
+      mode: document.getElementById('authMode').value,
+      dingtalk_corp_id: document.getElementById('dingtalkCorpId').value.trim(),
+      dingtalk_agent_id: document.getElementById('dingtalkAgentId').value.trim(),
       dingtalk_app_key: document.getElementById('dingtalkAppKey').value.trim(),
       dingtalk_app_secret: document.getElementById('dingtalkAppSecret').value.trim(),
       dingtalk_redirect_uri: document.getElementById('dingtalkRedirectUri').value.trim(),
@@ -520,6 +565,73 @@ async function saveConfig() {
     toggleSettings();
     await loadAuthState();
     await loadKnowledgeBase();
+  }
+}
+
+function isDingTalkContainer() {
+  const ua = navigator.userAgent || '';
+  return /DingTalk/i.test(ua) || !!(window.dd && window.dd.runtime);
+}
+
+async function maybeStartInAppLogin() {
+  if (inAppLoginTried) return;
+  if (!authState || !authState.enabled || !authState.ready || !authState.in_dingtalk_mode) return;
+  if (authState.authenticated) return;
+  if (!isDingTalkContainer()) {
+    const tip = document.getElementById('authTip');
+    tip.textContent = '当前不是钉钉客户端环境，无法执行免登。请从钉钉工作台进入，或临时切换为网页登录回调模式。';
+    tip.className = 'auth-tip warn';
+    tip.classList.remove('hidden');
+    return;
+  }
+
+  inAppLoginTried = true;
+  const tip = document.getElementById('authTip');
+  tip.textContent = '正在向钉钉申请免登身份...';
+  tip.className = 'auth-tip info';
+  tip.classList.remove('hidden');
+
+  const corpId = authState.corp_id;
+  if (!corpId) {
+    tip.textContent = '未配置 Corp ID，无法发起钉钉内免登。';
+    tip.className = 'auth-tip err';
+    return;
+  }
+
+  const requestAuthCode = () => new Promise((resolve, reject) => {
+    if (!(window.dd && dd.runtime && dd.runtime.permission && dd.runtime.permission.requestAuthCode)) {
+      reject(new Error('当前页面未加载可用的钉钉 JSAPI'));
+      return;
+    }
+    dd.ready(() => {
+      dd.runtime.permission.requestAuthCode({
+        corpId,
+        onSuccess: resolve,
+        onFail: reject,
+      });
+    });
+    dd.error((err) => reject(err || new Error('钉钉 JSAPI 初始化失败')));
+  });
+
+  try {
+    const res = await requestAuthCode();
+    const authCode = res.code || res.authCode;
+    if (!authCode) throw new Error('钉钉未返回免登 code');
+
+    const loginResp = await fetch('/api/auth/dingtalk/in-app-login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({auth_code: authCode}),
+    });
+    const loginData = await loginResp.json();
+    if (!loginResp.ok || loginData.error) {
+      throw new Error(loginData.error || '服务端免登失败');
+    }
+    await loadAuthState();
+  } catch (e) {
+    tip.textContent = '钉钉免登失败: ' + (e.message || JSON.stringify(e));
+    tip.className = 'auth-tip err';
+    tip.classList.remove('hidden');
   }
 }
 
@@ -591,13 +703,22 @@ function updateConfigStatus(ok) {
 }
 
 // ─── Parse URL ───
-async function parseUrl() {
+async function doParseUrl({showError = true, toggleButton = true} = {}) {
   const url = document.getElementById('feishuUrl').value.trim();
-  if (!url) { alert('请输入飞书表格链接'); return; }
+  if (!url) {
+    if (showError) alert('请输入飞书表格链接');
+    return null;
+  }
 
   const parseBtn = document.getElementById('parseBtn');
-  parseBtn.disabled = true;
-  parseBtn.textContent = '解析中...';
+  if (toggleButton) {
+    parseBtn.disabled = true;
+    parseBtn.textContent = '解析中...';
+  }
+  document.getElementById('resultCard').classList.add('hidden');
+  document.getElementById('progressCard').classList.add('hidden');
+  document.getElementById('inputCard').classList.remove('hidden');
+  document.getElementById('startBtn').disabled = false;
   document.getElementById('parseInfo').classList.add('hidden');
   document.getElementById('parseError').classList.add('hidden');
 
@@ -610,9 +731,11 @@ async function parseUrl() {
     const data = await r.json();
 
     if (data.error) {
-      document.getElementById('parseError').textContent = data.error;
-      document.getElementById('parseError').className = 'parse-error';
-      return;
+      if (showError) {
+        document.getElementById('parseError').textContent = data.error;
+        document.getElementById('parseError').className = 'parse-error';
+      }
+      return null;
     }
 
     currentTaskId = data.task_id;
@@ -620,13 +743,23 @@ async function parseUrl() {
     const skipInfo = data.new_count < data.total ? ` (${data.total - data.new_count} 条已有结果将跳过)` : '';
     document.getElementById('sheetMeta').textContent = `共 ${data.total} 条稿件，${data.new_count} 条待审核${skipInfo}`;
     document.getElementById('parseInfo').classList.remove('hidden');
+    return data;
   } catch(e) {
-    document.getElementById('parseError').textContent = '解析失败: ' + e.message;
-    document.getElementById('parseError').className = 'parse-error';
+    if (showError) {
+      document.getElementById('parseError').textContent = '解析失败: ' + e.message;
+      document.getElementById('parseError').className = 'parse-error';
+    }
+    return null;
   } finally {
-    parseBtn.disabled = false;
-    parseBtn.textContent = '解析';
+    if (toggleButton) {
+      parseBtn.disabled = false;
+      parseBtn.textContent = '解析';
+    }
   }
+}
+
+async function parseUrl() {
+  await doParseUrl();
 }
 
 async function quickFillApprovedContent() {
@@ -638,27 +771,22 @@ async function quickFillApprovedContent() {
   btn.disabled = true;
   parseBtn.disabled = true;
   btn.textContent = '处理中...';
+  document.getElementById('resultCard').classList.add('hidden');
+  document.getElementById('progressCard').classList.add('hidden');
+  document.getElementById('inputCard').classList.remove('hidden');
   document.getElementById('parseError').classList.add('hidden');
 
   try {
-    const parseResp = await fetch('/api/parse-url', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ url }),
-    });
-    const parseData = await parseResp.json();
+    const parseData = await doParseUrl({showError: false, toggleButton: false});
     if (parseData.error) {
       document.getElementById('parseError').textContent = parseData.error;
       document.getElementById('parseError').className = 'parse-error';
       document.getElementById('parseError').classList.remove('hidden');
       return;
     }
-
-    currentTaskId = parseData.task_id;
-    document.getElementById('sheetName').textContent = parseData.sheet;
-    const skipInfo = parseData.new_count < parseData.total ? ` (${parseData.total - parseData.new_count} 条已有结果将跳过)` : '';
-    document.getElementById('sheetMeta').textContent = `共 ${parseData.total} 条稿件，${parseData.new_count} 条待审核${skipInfo}`;
-    document.getElementById('parseInfo').classList.remove('hidden');
+    if (!parseData) {
+      throw new Error('解析失败');
+    }
 
     await startFillApprovedContentJob(currentTaskId, btn, parseBtn);
   } catch(e) {
@@ -757,8 +885,39 @@ async function handleReviewStreamDisconnect(taskId) {
 }
 
 // ─── Review ───
-function startReview() {
-  if (!currentTaskId) return;
+async function ensureReadyTask() {
+  const url = document.getElementById('feishuUrl').value.trim();
+  if (!url) {
+    alert('请输入飞书表格链接');
+    return null;
+  }
+
+  if (!currentTaskId) {
+    const parsed = await doParseUrl();
+    return parsed ? currentTaskId : null;
+  }
+
+  try {
+    const resp = await fetch(`/api/tasks/${currentTaskId}/status`);
+    const data = await parseJsonSafely(resp);
+    if (data.error || !data.status) {
+      const parsed = await doParseUrl();
+      return parsed ? currentTaskId : null;
+    }
+    if (data.status !== 'ready') {
+      const parsed = await doParseUrl();
+      return parsed ? currentTaskId : null;
+    }
+    return currentTaskId;
+  } catch (e) {
+    const parsed = await doParseUrl();
+    return parsed ? currentTaskId : null;
+  }
+}
+
+async function startReview() {
+  const readyTaskId = await ensureReadyTask();
+  if (!readyTaskId) return;
 
   document.getElementById('inputCard').classList.add('hidden');
   document.getElementById('progressCard').classList.remove('hidden');
@@ -767,7 +926,7 @@ function startReview() {
   const log = document.getElementById('progressLog');
   log.innerHTML = '';
 
-  const es = new EventSource(`/api/review/${currentTaskId}`);
+  const es = new EventSource(`/api/review/${readyTaskId}`);
 
   es.onmessage = (e) => {
     const d = JSON.parse(e.data);
@@ -810,17 +969,21 @@ function startReview() {
 
     if (d.type === 'error') {
       es.close();
+      document.getElementById('inputCard').classList.remove('hidden');
+      document.getElementById('startBtn').disabled = false;
       document.getElementById('progressText').textContent = d.msg;
     }
   };
 
   es.onerror = () => {
     es.close();
-    handleReviewStreamDisconnect(currentTaskId);
+    handleReviewStreamDisconnect(readyTaskId);
   };
 }
 
 function showResults(data) {
+  document.getElementById('inputCard').classList.add('hidden');
+  document.getElementById('startBtn').disabled = false;
   document.getElementById('progressCard').classList.add('hidden');
   document.getElementById('resultCard').classList.remove('hidden');
 
@@ -875,6 +1038,12 @@ function resetAll() {
   document.getElementById('feishuUrl').value = '';
   document.getElementById('writeBackStatus').innerHTML = '';
 }
+
+document.getElementById('feishuUrl').addEventListener('input', () => {
+  currentTaskId = null;
+  document.getElementById('parseInfo').classList.add('hidden');
+  document.getElementById('parseError').classList.add('hidden');
+});
 
 // Init
 loadConfig();

@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import subprocess
-import sys
 from typing import Any, Dict, List
 
 from PIL import Image, ImageFilter, ImageStat
@@ -18,13 +15,6 @@ from .volcengine_ocr import (
 )
 
 logger = logging.getLogger(__name__)
-
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_OCR_PYTHON = os.getenv(
-    "PADDLEOCR_PYTHON",
-    os.path.join(BASE_DIR, ".venv_paddleocr", "bin", "python"),
-)
-OCR_WORKER = os.path.join(BASE_DIR, "core", "ocr_worker.py")
 
 
 def filter_images_for_text_check(image_paths: List[str]) -> Dict[str, Any]:
@@ -92,24 +82,12 @@ def select_images_for_ocr(image_paths: List[str]) -> List[str]:
     return selected
 
 
-def _get_ocr_timeout_seconds() -> float:
-    """读取 OCR 超时时间，默认走短超时，避免阻塞主审核流程。"""
-    raw_timeout = os.getenv("OCR_TIMEOUT_SECONDS", "0")
-    try:
-        timeout_seconds = float(raw_timeout)
-    except ValueError:
-        timeout_seconds = 0.0
-    return max(0.0, timeout_seconds)
-
-
 def _get_ocr_provider(config: Dict[str, Any]) -> str:
     provider = str(os.getenv("OCR_PROVIDER") or config.get("ocr_provider") or "").strip().lower()
     if provider:
         return provider
     if volcengine_config_ready(config):
         return "volcengine"
-    if _get_ocr_timeout_seconds() > 0:
-        return "paddle"
     return "disabled"
 
 
@@ -144,144 +122,12 @@ def run_ocr_on_images(image_paths: List[str]) -> Dict[str, Any]:
     if provider == "volcengine":
         return run_ocr_on_images_with_volcengine(unique_paths, config=config)
 
-    if provider in {"volcengine_fallback_paddle", "paddle_fallback_volcengine"}:
-        paddle_result = _run_paddle_ocr(unique_paths)
-        if paddle_result.get("merged_text") or paddle_result.get("available", True):
-            return paddle_result
-        logger.info("Paddle OCR unavailable, falling back to Volcengine OCR")
-        return run_ocr_on_images_with_volcengine(unique_paths, config=config)
-
-    if provider != "paddle":
-        reason = f"Unknown OCR provider: {provider}"
-        logger.warning(reason)
-        return {
-            "texts": [],
-            "merged_text": "",
-            "errors": [reason],
-            "available": False,
-            "skip_reason": reason,
-        }
-
-    return _run_paddle_ocr(unique_paths)
-
-
-def _run_paddle_ocr(unique_paths: List[str]) -> Dict[str, Any]:
-    """Run PaddleOCR out-of-process so main text audit remains isolated."""
-    timeout_seconds = _get_ocr_timeout_seconds()
-    if timeout_seconds <= 0:
-        reason = "OCR 已通过 OCR_TIMEOUT_SECONDS=0 禁用"
-        logger.info(reason)
-        return {
-            "texts": [],
-            "merged_text": "",
-            "errors": [reason],
-            "available": False,
-            "skip_reason": reason,
-        }
-
-    if not os.path.exists(DEFAULT_OCR_PYTHON):
-        error = f"OCR Python not found: {DEFAULT_OCR_PYTHON}"
-        logger.warning(error)
-        return {
-            "texts": [],
-            "merged_text": "",
-            "errors": [error],
-            "available": False,
-            "skip_reason": error,
-        }
-
-    if not os.path.exists(OCR_WORKER):
-        error = f"OCR worker not found: {OCR_WORKER}"
-        logger.warning(error)
-        return {
-            "texts": [],
-            "merged_text": "",
-            "errors": [error],
-            "available": False,
-            "skip_reason": error,
-        }
-
-    try:
-        env = os.environ.copy()
-        env.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
-        logger.info(
-            "Launching OCR subprocess: python=%s worker=%s timeout=%ss images=%s",
-            DEFAULT_OCR_PYTHON,
-            OCR_WORKER,
-            timeout_seconds,
-            unique_paths,
-        )
-        completed = subprocess.run(
-            [DEFAULT_OCR_PYTHON, OCR_WORKER, *unique_paths],
-            capture_output=True,
-            text=True,
-            check=False,
-            env=env,
-            timeout=timeout_seconds,
-        )
-    except subprocess.TimeoutExpired:
-        reason = f"OCR subprocess timed out after {timeout_seconds:g} seconds"
-        logger.warning("%s, skipping OCR", reason)
-        return {
-            "texts": [],
-            "merged_text": "",
-            "errors": [reason],
-            "available": False,
-            "skip_reason": reason,
-        }
-    except Exception as exc:  # pragma: no cover - subprocess failures are environmental
-        error = f"OCR subprocess failed: {exc}"
-        logger.error(error)
-        return {
-            "texts": [],
-            "merged_text": "",
-            "errors": [error],
-            "available": False,
-            "skip_reason": error,
-        }
-
-    if completed.returncode != 0:
-        stderr = (completed.stderr or completed.stdout or "").strip()
-        error = f"OCR subprocess exited with {completed.returncode}: {stderr}"
-        logger.error(error)
-        return {
-            "texts": [],
-            "merged_text": "",
-            "errors": [error],
-            "available": False,
-            "skip_reason": error,
-        }
-
-    try:
-        parsed = json.loads(completed.stdout.strip() or "{}")
-    except json.JSONDecodeError as exc:
-        error = f"OCR subprocess returned invalid JSON: {exc}"
-        logger.error(error)
-        return {
-            "texts": [],
-            "merged_text": "",
-            "errors": [error],
-            "available": False,
-            "skip_reason": error,
-        }
-
-    image_texts = []
-    merged_text_parts = []
-    errors = []
-    for item in parsed.get("results") or []:
-        text = str(item.get("text") or "").strip()
-        error = str(item.get("error") or "").strip()
-        image_path = str(item.get("image_path") or "")
-        image_texts.append({"image_path": image_path, "text": text, "error": error})
-        if text:
-            merged_text_parts.append(text)
-        if error:
-            errors.append(f"{os.path.basename(image_path) or image_path}: {error}")
-
+    reason = f"Unknown OCR provider: {provider}"
+    logger.warning(reason)
     return {
-        "texts": image_texts,
-        "merged_text": "\n\n".join(merged_text_parts).strip(),
-        "errors": errors,
-        "available": True,
-        "skip_reason": "",
+        "texts": [],
+        "merged_text": "",
+        "errors": [reason],
+        "available": False,
+        "skip_reason": reason,
     }
