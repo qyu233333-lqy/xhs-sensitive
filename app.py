@@ -86,4 +86,4 @@ if __name__ == "__main__":
 
     # 运行应用
     logger.info("Starting Content Review Web Application")
-    app.run(host="0.0.0.0", port=8000, debug=False)
+    app.run(host="0.0.0.0", port=8002, debug=False)
