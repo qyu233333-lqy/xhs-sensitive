@@ -96,6 +96,9 @@ body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
 .config-status { font-size: 13px; padding: 6px 12px; border-radius: 6px; display: inline-block; }
 .config-ok { background: #f6ffed; color: #52c41a; }
 .config-missing { background: #fff2f0; color: #f5222d; }
+.inline-msg { margin-top: 10px; padding: 10px 12px; border-radius: 8px; font-size: 13px; }
+.inline-msg.ok { background: #f6ffed; color: #389e0d; }
+.inline-msg.err { background: #fff2f0; color: #cf1322; }
 
 .knowledge-form textarea {
   width: 100%;
@@ -122,6 +125,7 @@ body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
 .auth-tip.warn { background:#fff7e6; color:#ad6800; }
 .auth-tip.err { background:#fff2f0; color:#cf1322; }
 .auth-tip.info { background:#f0f5ff; color:#1d39c4; }
+.auth-tip.ok { background:#f6ffed; color:#389e0d; }
 .mode-hint { color:#666; font-size:12px; margin-top:4px; }
 </style>
 </head>
@@ -245,6 +249,7 @@ body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
       <div style="text-align:right; margin-top:8px;">
         <button class="btn btn-primary btn-sm" onclick="saveConfig()">保存设置</button>
       </div>
+      <div id="saveConfigMsg" class="inline-msg hidden"></div>
     </div>
   </div>
 
@@ -446,10 +451,13 @@ function renderAuthState() {
   logoutBtn.classList.add('hidden');
 
   if (!authState || !authState.enabled) {
-    authCard.classList.add('hidden');
-    summary.innerHTML = '<strong>登录模式：</strong>未启用钉钉登录，当前为本地管理模式。';
+    authCard.classList.remove('hidden');
+    summary.innerHTML = '<strong>访问模式：</strong>免登录模式，打开页面即可直接使用。';
+    tip.textContent = '当前已关闭钉钉登录。上线后用户无需登录，也可以直接解析飞书、上传文件、开始审核和回填内容。';
+    tip.className = 'auth-tip ok';
+    tip.classList.remove('hidden');
     settingsCard.classList.remove('hidden');
-    profileHint.textContent = '当前未启用登录鉴权，默认使用本地配置的部门 profile。';
+    profileHint.textContent = '当前未启用登录鉴权，系统将直接使用本地默认的部门 profile 和服务端配置。';
     parseBtn.disabled = false;
     quickFillBtn.disabled = false;
     return;
@@ -511,6 +519,10 @@ async function logout() {
 }
 
 async function saveConfig() {
+  const saveMsg = document.getElementById('saveConfigMsg');
+  const saveBtn = document.querySelector('#settingsBody .btn-primary');
+  saveMsg.className = 'inline-msg hidden';
+  saveMsg.textContent = '';
   const key = document.getElementById('apiKey').value.trim();
   const data = {
     base_url: document.getElementById('baseUrl').value.trim(),
@@ -538,12 +550,22 @@ async function saveConfig() {
   const feishuSecret = document.getElementById('feishuAppSecret').value.trim();
   if (feishuSecret) data.feishu_app_secret = feishuSecret;
 
-  const r = await fetch('/api/config', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(data),
-  });
-  if (r.ok) {
+  saveBtn.disabled = true;
+  saveBtn.textContent = '保存中...';
+  try {
+    const r = await fetch('/api/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(data),
+    });
+    const result = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const errorText = result.error || `保存失败（HTTP ${r.status}）`;
+      saveMsg.textContent = errorText;
+      saveMsg.className = 'inline-msg err';
+      return;
+    }
+
     updateConfigStatus(true);
     document.getElementById('apiKey').value = '';
     document.getElementById('apiKey').placeholder = '已保存: ' + (key ? key.slice(0,6)+'***'+key.slice(-4) : '(之前的值)');
@@ -562,9 +584,17 @@ async function saveConfig() {
       document.getElementById('volcengineSecretKey').placeholder = '已保存: ' + volcengineSecretKey.slice(0,4) + '***' + volcengineSecretKey.slice(-4);
     }
     document.getElementById('dingtalkAppSecret').value = '';
+    saveMsg.textContent = result.message || '配置已保存';
+    saveMsg.className = 'inline-msg ok';
     toggleSettings();
     await loadAuthState();
     await loadKnowledgeBase();
+  } catch (e) {
+    saveMsg.textContent = '保存失败：' + (e && e.message ? e.message : '网络异常');
+    saveMsg.className = 'inline-msg err';
+  } finally {
+    saveBtn.disabled = false;
+    saveBtn.textContent = '保存设置';
   }
 }
 
@@ -728,11 +758,19 @@ async function doParseUrl({showError = true, toggleButton = true} = {}) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ url }),
     });
-    const data = await r.json();
+    const data = await parseJsonSafely(r);
 
-    if (data.error) {
+    if (!data || typeof data !== 'object') {
       if (showError) {
-        document.getElementById('parseError').textContent = data.error;
+        document.getElementById('parseError').textContent = `解析失败: 服务器返回了异常响应（HTTP ${r.status}）`;
+        document.getElementById('parseError').className = 'parse-error';
+      }
+      return null;
+    }
+
+    if (!r.ok || data.error) {
+      if (showError) {
+        document.getElementById('parseError').textContent = data.error || `解析失败（HTTP ${r.status}）`;
         document.getElementById('parseError').className = 'parse-error';
       }
       return null;
@@ -778,14 +816,14 @@ async function quickFillApprovedContent() {
 
   try {
     const parseData = await doParseUrl({showError: false, toggleButton: false});
+    if (!parseData || typeof parseData !== 'object') {
+      throw new Error('解析失败');
+    }
     if (parseData.error) {
       document.getElementById('parseError').textContent = parseData.error;
       document.getElementById('parseError').className = 'parse-error';
       document.getElementById('parseError').classList.remove('hidden');
       return;
-    }
-    if (!parseData) {
-      throw new Error('解析失败');
     }
 
     await startFillApprovedContentJob(currentTaskId, btn, parseBtn);
@@ -820,7 +858,14 @@ async function fillApprovedContent() {
 async function parseJsonSafely(resp) {
   const text = await resp.text();
   try {
-    return text ? JSON.parse(text) : {error: `空响应（HTTP ${resp.status})`};
+    const parsed = text ? JSON.parse(text) : null;
+    if (parsed === null || parsed === undefined) {
+      return {error: `空响应（HTTP ${resp.status})`};
+    }
+    if (typeof parsed !== 'object') {
+      return {value: parsed};
+    }
+    return parsed;
   } catch (e) {
     return {error: text || `服务器返回了非 JSON 响应（HTTP ${resp.status})`};
   }
@@ -831,7 +876,11 @@ async function pollFillApprovedContentStatus(taskId, btn, extraBtn) {
     await new Promise(resolve => setTimeout(resolve, 1200));
     const resp = await fetch(`/api/fill-approved-content/${taskId}/status`);
     const data = await parseJsonSafely(resp);
-    if (data.error) throw new Error(data.error);
+    if (!data || typeof data !== 'object') {
+      throw new Error(`获取回填状态失败（HTTP ${resp.status}）`);
+    }
+    if (!resp.ok && data.error) throw new Error(data.error);
+    if (!resp.ok) throw new Error(`获取回填状态失败（HTTP ${resp.status}）`);
 
     const processed = data.processed_rows || 0;
     const total = data.total || 0;
@@ -850,7 +899,11 @@ async function startFillApprovedContentJob(taskId, btn, extraBtn) {
     headers: {'Content-Type': 'application/json'}
   });
   const data = await parseJsonSafely(resp);
-  if (data.error) throw new Error(data.error);
+  if (!data || typeof data !== 'object') {
+    throw new Error(`启动回填失败（HTTP ${resp.status}）`);
+  }
+  if (!resp.ok && data.error) throw new Error(data.error);
+  if (!resp.ok) throw new Error(`启动回填失败（HTTP ${resp.status}）`);
 
   const result = await pollFillApprovedContentStatus(taskId, btn, extraBtn);
   alert(result.message + `（更新 ${result.updated} 条，跳过 ${result.skipped} 条）`);

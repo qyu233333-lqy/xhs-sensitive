@@ -123,10 +123,18 @@ def split_feishu_doc_content(content: str) -> Dict[str, str]:
     body_lines = lines[1:]
     comment = ""
 
+    def _is_comment_section_header(line: str) -> bool:
+        normalized = re.sub(
+            r"^(?:[一二三四五六七八九十1234567890ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+[、.．\- ]*)?",
+            "",
+            line.replace("：", ":").strip(),
+        )
+        return bool(normalized) and "评论" in normalized
+
     for i, line in enumerate(body_lines):
         normalized = line.replace("：", ":")
-        if normalized.startswith("评论区文案:") or normalized.startswith("评论区:"):
-            comment = normalized.split(":", 1)[1].strip()
+        if _is_comment_section_header(line):
+            comment = normalized.split(":", 1)[1].strip() if ":" in normalized else ""
             body_lines = body_lines[:i]
             break
 
@@ -159,11 +167,31 @@ def extract_review_doc_sections(content: str) -> Dict[str, str]:
     def _is_body_header(line: str) -> bool:
         return bool(re.match(r"^(?:[一二三四五六七八九十1234567890ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+[、.．\- ]*)?(?:发布文案|文案|正文|内容)\s*[：:]?$", line))
 
+    def _strip_section_prefix(line: str) -> str:
+        return re.sub(
+            r"^(?:[一二三四五六七八九十1234567890ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+[、.．\- ]*)?",
+            "",
+            line,
+        ).strip()
+
     def _is_comment_header(line: str) -> bool:
-        return bool(re.match(r"^(?:评论区置顶|置顶评论|评论区文案)\s*[：:]?", line))
+        normalized = _strip_section_prefix(line.replace("：", ":"))
+        return bool(normalized) and "评论" in normalized
 
     def _is_next_major_header(line: str) -> bool:
         return bool(re.match(r"^(?:[一二三四五六七八九十1234567890ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+[、.．\- ]*)?(?:内容概述|参考视频|脚本内容|视频时长|视频尺寸)\s*[：:]?", line))
+
+    def _looks_like_media_filename(line: str) -> bool:
+        candidate = str(line or "").strip()
+        if not candidate:
+            return False
+        return bool(
+            re.match(
+                r"^[^\s]+\.(?:jpg|jpeg|png|gif|webp|bmp|heic|mp4|mov|avi|m4v|wmv|mkv|webm)$",
+                candidate,
+                flags=re.IGNORECASE,
+            )
+        )
 
     for line in lines:
         inline_title = _extract_inline_value(
@@ -186,7 +214,7 @@ def extract_review_doc_sections(content: str) -> Dict[str, str]:
 
         inline_comment = _extract_inline_value(
             line,
-            r"^(?:评论区置顶|置顶评论|评论区文案)\s*[：:]\s*(.+)$",
+            r"^(?:[一二三四五六七八九十1234567890ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+[、.．\- ]*)?[^：:\n]*评论[^：:\n]*\s*[：:]\s*(.+)$",
         )
         if inline_comment is not None:
             section = "comment"
@@ -200,13 +228,20 @@ def extract_review_doc_sections(content: str) -> Dict[str, str]:
             section = "body"
             continue
         if _is_comment_header(line):
-            normalized = re.sub(r"^(?:评论区置顶|置顶评论|评论区文案)\s*[：:]?", "", line).strip()
+            normalized = re.sub(
+                r"^(?:[一二三四五六七八九十1234567890ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+[、.．\- ]*)?",
+                "",
+                line,
+            ).strip()
+            normalized = re.sub(r"^[^：:\n]*评论[^：:\n]*\s*[：:]?", "", normalized).strip()
             section = "comment"
             if normalized:
                 comment_lines.append(normalized)
             continue
         if _is_next_major_header(line):
             section = None
+            continue
+        if _looks_like_media_filename(line):
             continue
 
         if section == "title":
@@ -601,6 +636,7 @@ def _fetch_bitable_data(url: str, app_id: str, app_secret: str, auditable_only: 
     """获取 Bitable（多维表格）数据。"""
     parsed = urlparse(url)
     path_parts = parsed.path.strip('/').split('/')
+    query_params = parse_qs(parsed.query)
 
     app_token = None
     for i, part in enumerate(path_parts):
@@ -608,8 +644,7 @@ def _fetch_bitable_data(url: str, app_id: str, app_secret: str, auditable_only: 
             app_token = path_parts[i + 1]
             break
 
-        query_params = parse_qs(parsed.query)
-        table_id = _first_query_value(query_params, "table")
+    table_id = _first_query_value(query_params, "table")
 
     if not app_token:
         raise ValueError("无法从URL中提取app_token")
@@ -1416,7 +1451,12 @@ def _extract_docx_image_tokens_from_blocks(blocks: List[Dict[str, Any]]) -> List
 
 
 def _extract_block_plain_text(block: Dict[str, Any]) -> str:
-    text_node = block.get("text")
+    text_node = None
+    for key in ("text", "heading1", "heading2", "heading3", "bullet"):
+        candidate = block.get(key)
+        if isinstance(candidate, dict):
+            text_node = candidate
+            break
     if not isinstance(text_node, dict):
         return ""
 
@@ -1458,21 +1498,33 @@ def _extract_docx_image_tokens_for_fill(blocks: List[Dict[str, Any]]) -> Dict[st
                 result.append(value)
         return result
 
+    def _is_major_section_boundary(text: str) -> bool:
+        if not text:
+            return False
+        if re.match(r"^[一二三四五六七八九十]+、", text):
+            return True
+        if re.match(r"^[0-9]+[、.]", text):
+            return True
+        return any(
+            keyword in text
+            for keyword in ("创意概述", "内容概述", "参考视频", "脚本文案", "脚本内容", "视频时长", "视频尺寸")
+        )
+
     for block in blocks:
         line = _extract_block_plain_text(block)
         normalized = re.sub(r"\s+", "", line.replace("：", ":"))
 
-        if normalized.startswith(("评论区置顶:", "置顶评论:", "评论区文案:")):
+        if "评论" in normalized and ":" in normalized:
             zone = "comment"
-        elif normalized in {"评论区置顶", "置顶评论", "评论区文案"}:
+        elif "评论" in normalized:
             zone = "comment"
         elif normalized.startswith("封面:") or normalized == "封面":
             zone = "cover"
         elif normalized.startswith(("视频成片:", "成片:", "视频成片", "成片")):
             zone = "asset"
-        elif re.match(r"^[二三四五六七八九十]+、", normalized):
+        elif _is_major_section_boundary(normalized):
             zone = "other"
-        elif any(keyword in normalized for keyword in ("笔记配图", "配图", "发布文案+成片", "发布文案", "正文", "标题")):
+        elif any(keyword in normalized for keyword in ("笔记配图", "笔记图片", "配图", "图片", "发布文案+成片", "发布文案", "正文", "标题")):
             zone = "body"
 
         if block.get("block_type") != 27:

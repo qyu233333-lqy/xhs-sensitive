@@ -204,6 +204,8 @@ def _run_fill_approved_content(task_id: str) -> None:
                 skipped += 1
                 continue
 
+            skip_image_fill = review_status == "视频审核通过"
+
             record_id = row.get("_record_id")
             link_value = row.get("稿件链接")
             snapshot = download_feishu_doc_snapshot(
@@ -223,7 +225,7 @@ def _run_fill_approved_content(task_id: str) -> None:
                 if value:
                     fields[field_name] = value
 
-            if image_field_name and app_token:
+            if image_field_name and app_token and not skip_image_fill:
                 image_bundle = fetch_feishu_doc_images(
                     link_value,
                     config["feishu_app_id"],
@@ -327,12 +329,16 @@ def handle_config():
     try:
         config = load_config()
         auth_enabled = is_auth_enabled(config)
+        auth_ready = is_auth_ready(config)
         current_user = get_current_user()
         if auth_enabled and request.method == "POST":
-            if not current_user:
-                return safe_json_response({"error": "请先使用钉钉登录", "auth_required": True}, 401)
-            if not current_user.get("is_admin"):
-                return safe_json_response({"error": "需要管理员权限", "auth_required": True}, 403)
+            # Allow bootstrap updates while auth is enabled but still incomplete,
+            # otherwise the operator gets locked out and cannot finish setup.
+            if auth_ready:
+                if not current_user:
+                    return safe_json_response({"error": "请先使用钉钉登录", "auth_required": True}, 401)
+                if not current_user.get("is_admin"):
+                    return safe_json_response({"error": "需要管理员权限", "auth_required": True}, 403)
 
         if request.method == "GET":
             profiles = config.get("key_profiles") or {}

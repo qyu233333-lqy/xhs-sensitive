@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import csv
+import importlib.util
 
 from unittest.mock import patch, MagicMock
 
@@ -23,6 +24,15 @@ from core.feishu import (
 )
 from core.project import save_project_config
 from core.project import load_project_configs_from_feishu
+
+
+_LOCALIZED_FEISHU_SPEC = importlib.util.spec_from_file_location(
+    "test_feishu_localized_module",
+    os.path.join(os.path.dirname(__file__), "core", "feishu飞书.py"),
+)
+_LOCALIZED_FEISHU = importlib.util.module_from_spec(_LOCALIZED_FEISHU_SPEC)
+assert _LOCALIZED_FEISHU_SPEC and _LOCALIZED_FEISHU_SPEC.loader
+_LOCALIZED_FEISHU_SPEC.loader.exec_module(_LOCALIZED_FEISHU)
 
 
 class TestIsBitableUrl:
@@ -258,6 +268,33 @@ class TestFetchSheetsData:
 
 
 class TestBitableApis:
+    @patch.object(_LOCALIZED_FEISHU, "_fetch_bitable_with_token")
+    def test_fetch_bitable_data_supports_base_url_with_view_query(self, mock_fetch_bitable):
+        mock_fetch_bitable.return_value = {
+            "sheet_id": "tblNfE5XGB7HfoU8",
+            "headers": [],
+            "data": [],
+            "title": "Untitled bitable",
+            "total_rows": 0,
+            "is_bitable": True,
+        }
+
+        result = _LOCALIZED_FEISHU._fetch_bitable_data(
+            "https://my.feishu.cn/base/KkKab6H6wah8EXsxPpccMMMLnbd?table=tblNfE5XGB7HfoU8&view=vewnSWAOY2",
+            "app-id",
+            "app-secret",
+        )
+
+        assert result["is_bitable"] is True
+        mock_fetch_bitable.assert_called_once_with(
+            "KkKab6H6wah8EXsxPpccMMMLnbd",
+            "tblNfE5XGB7HfoU8",
+            "app-id",
+            "app-secret",
+            "https://my.feishu.cn/base/KkKab6H6wah8EXsxPpccMMMLnbd?table=tblNfE5XGB7HfoU8&view=vewnSWAOY2",
+            auditable_only=True,
+        )
+
     @patch("core.feishu.get_feishu_token", return_value="token-123")
     @patch("core.feishu.http_requests.get")
     def test_fetch_bitable_keeps_record_id(self, mock_get, _mock_token):
@@ -391,6 +428,59 @@ class TestExtractReviewDocSections:
         assert result["标题"] == "报告！你的小猫已经有5分钟没进食了…"
         assert "有没有在你家小猫脸上看到过同款表情？" in result["文案"]
         assert result["评论区文案"] == "养猫人速来get！"
+
+    def test_extract_review_doc_sections_supports_comment_qu_header_and_skips_media_names(self):
+        content = """发布文案
+标题：
+今天也想去现场
+正文：
+正文第一段
+评论区：
+一起去歌手现场！
+2fc4728fd076b6b7cb9f04aa08e93322.jpg
+"""
+
+        result = extract_review_doc_sections(content)
+
+        assert result["标题"] == "今天也想去现场"
+        assert result["文案"] == "正文第一段"
+        assert result["评论区文案"] == "一起去歌手现场！"
+
+
+class TestExtractDocxImageTokensForFill:
+    def test_cover_zone_stops_at_later_sections(self):
+        blocks = [
+            {"block_type": 2, "text": {"elements": [{"text_run": {"content": "标题"}}]}},
+            {"block_type": 27, "image": {"token": "bodyToken12345"}},
+            {"block_type": 2, "text": {"elements": [{"text_run": {"content": "评论区："}}]}},
+            {"block_type": 27, "image": {"token": "commentToken12345"}},
+            {"block_type": 2, "text": {"elements": [{"text_run": {"content": "封面"}}]}},
+            {"block_type": 27, "image": {"token": "coverToken12345"}},
+            {"block_type": 2, "text": {"elements": [{"text_run": {"content": "二、创意概述"}}]}},
+            {"block_type": 27, "image": {"token": "overviewToken12345"}},
+            {"block_type": 2, "text": {"elements": [{"text_run": {"content": "1、开头"}}]}},
+            {"block_type": 27, "image": {"token": "outlineToken12345"}},
+        ]
+
+        result = _LOCALIZED_FEISHU._extract_docx_image_tokens_for_fill(blocks)
+
+        assert result["cover_tokens"] == ["coverToken12345"]
+        assert result["body_tokens"] == ["bodyToken12345"]
+        assert result["fill_tokens"] == ["coverToken12345", "bodyToken12345"]
+
+    def test_note_image_zone_is_treated_as_body(self):
+        blocks = [
+            {"block_type": 2, "text": {"elements": [{"text_run": {"content": "笔记图片"}}]}},
+            {"block_type": 27, "image": {"token": "bodyTokenA1234"}},
+            {"block_type": 27, "image": {"token": "bodyTokenB1234"}},
+            {"block_type": 2, "text": {"elements": [{"text_run": {"content": "评论区："}}]}},
+            {"block_type": 27, "image": {"token": "commentToken12345"}},
+        ]
+
+        result = _LOCALIZED_FEISHU._extract_docx_image_tokens_for_fill(blocks)
+
+        assert result["body_tokens"] == ["bodyTokenA1234", "bodyTokenB1234"]
+        assert result["fill_tokens"] == ["bodyTokenA1234", "bodyTokenB1234"]
 
 
 class TestFetchFeishuContent:
